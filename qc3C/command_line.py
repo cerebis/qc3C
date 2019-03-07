@@ -13,6 +13,9 @@ import tqdm
 import toml
 from Bio.Restriction import Restriction
 
+__version__ = '0.1'
+
+
 ligation_info = namedtuple('ligation_info', ('junction', 'end_match', 'junc_len', 'site_len'))
 
 pair_info = namedtuple('pair_info', ('name', 'pos', 'length', 'is_reverse', 'cigarstring'))
@@ -180,143 +183,145 @@ def count_bam_reads(file_name, max_cpu=None):
     return int(proc.stdout.readline())
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--log', action='store_true', default=False, help='Keep a log of pairs with cut-sites')
-parser.add_argument('-t', '--threads', type=int, default=None, help='Number of threads')
-parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append', nargs=1,
-                    help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
-parser.add_argument('FASTA', help='Input Fasta of references used in mapping')
-parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
-args = parser.parse_args()
+def main():
 
-ligation_variants = []
-for ename in args.enzyme:
-    ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename[0])))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--log', action='store_true', default=False, help='Keep a log of pairs with cut-sites')
+    parser.add_argument('-t', '--threads', type=int, default=None, help='Number of threads')
+    parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append', nargs=1,
+                        help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
+    parser.add_argument('FASTA', help='Input Fasta of references used in mapping')
+    parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
+    args = parser.parse_args()
 
-with pysam.AlignmentFile(args.BAM, 'rb') as bam_file:
+    ligation_variants = []
+    for ename in args.enzyme:
+        ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename[0])))
 
-    counts = {
-        'ref_term': 0,
-        'full_align': 0,
-        'early_term': 0,
-        'cs_term': 0,
-        'cs_full': 0,
-        'read_thru': 0,
-        'is_split': 0,
-        'no_site': 0,
-    }
+    with pysam.AlignmentFile(args.BAM, 'rb') as bam_file:
 
-    ref_lengths = [li for li in bam_file.lengths]
-    ref_names = [ni for ni in bam_file.references]
+        counts = {
+            'ref_term': 0,
+            'full_align': 0,
+            'early_term': 0,
+            'cs_term': 0,
+            'cs_full': 0,
+            'read_thru': 0,
+            'is_split': 0,
+            'no_site': 0,
+        }
 
-    pair_log = {}
+        ref_lengths = [li for li in bam_file.lengths]
+        ref_names = [ni for ni in bam_file.references]
 
-    rmate = None
-    prev_r = None
+        pair_log = {}
 
-    progress = None
-    try:
+        rmate = None
+        prev_r = None
 
-        print('Counting reads in bam file...')
-        n_reads = count_bam_reads(args.BAM, args.threads)
+        progress = None
+        try:
 
-        print('Analyzing bam file...')
-        progress = tqdm.tqdm(total=n_reads)
-        bam_iter = bam_file.fetch(until_eof=True)
-        while True:
+            print('Counting reads in bam file...')
+            n_reads = count_bam_reads(args.BAM, args.threads)
 
-            try:
-                r = next(bam_iter)
-                progress.update()
+            print('Analyzing bam file...')
+            progress = tqdm.tqdm(total=n_reads)
+            bam_iter = bam_file.fetch(until_eof=True)
+            while True:
 
-                if args.log:
-                    if prev_r is not None:
-                        if r.query_name == prev_r.query_name:
-                            rmate = prev_r
-                        else:
-                            rmate = None
-                    prev_r = r
+                try:
+                    r = next(bam_iter)
+                    progress.update()
 
-                if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
-                    # reads which align to the ends of references are ignored
-                    counts['ref_term'] += 1
-                    continue
+                    if args.log:
+                        if prev_r is not None:
+                            if r.query_name == prev_r.query_name:
+                                rmate = prev_r
+                            else:
+                                rmate = None
+                        prev_r = r
 
-                if r.query_length == r.reference_length:
-                    counts['full_align'] += 1
-                    # fully aligned reads can't be tested for the junction but
-                    # we can still test for the cut-site
+                    if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
+                        # reads which align to the ends of references are ignored
+                        counts['ref_term'] += 1
+                        continue
+
+                    if r.query_length == r.reference_length:
+                        counts['full_align'] += 1
+                        # fully aligned reads can't be tested for the junction but
+                        # we can still test for the cut-site
+                        seq = get_forward_strand(r)
+                        for lig in ligation_variants:
+                            if seq.endswith(lig.end_match):
+                                counts['cs_full'] += 1
+                                break
+                        continue
+
+                    counts['early_term'] += 1
+
+                    # inspect all sequences in as 5'-3'
                     seq = get_forward_strand(r)
+
+                    # the aligned sequence, which should end with cut-site
+                    aseq = seq[:r.reference_length]
+
+                    # check that a cut-site exists on the end
+                    found_lig = False
                     for lig in ligation_variants:
-                        if seq.endswith(lig.end_match):
-                            counts['cs_full'] += 1
+                        if aseq.endswith(lig.end_match):
+                            found_lig = True
+                            counts['cs_term'] += 1
+
+                            if args.log:
+                                # record those pairs which at least have one cut-site terminated read
+                                pair_log.setdefault(r.query_name, set()).add(
+                                    pair_info(ref_names[r.reference_id], r.reference_start, r.reference_length,
+                                              r.is_reverse, r.cigarstring))
+                                if rmate is not None :
+                                    if rmate.query_name != r.query_name:
+                                        break
+                                    pair_log[r.query_name].add(
+                                        pair_info(ref_names[rmate.reference_id], rmate.reference_start,
+                                                  rmate.reference_length, rmate.is_reverse, rmate.cigarstring))
+
+                            # a proximity ligation product should contain a characteristic
+                            # sequence which duplicates a portion of the cut-site. Check
+                            # and see if the read contains this.
+                            # Note: less often, read needs may not have enough remaining seq!
+                            jseq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
+                            if jseq.endswith(lig.junction):
+                                counts['read_thru'] += 1
+
+                                if r.has_tag('SA'):
+                                    counts['is_split'] += 1
+                                    sec_align = parse_tag(r.get_tag('SA'))
+
                             break
-                    continue
 
-                counts['early_term'] += 1
+                    if not found_lig:
+                        counts['no_site'] += 1
 
-                # inspect all sequences in as 5'-3'
-                seq = get_forward_strand(r)
+                except StopIteration as e:
+                    break
+        finally:
+            if progress:
+                progress.close()
 
-                # the aligned sequence, which should end with cut-site
-                aseq = seq[:r.reference_length]
+        total = counts['ref_term'] + counts['full_align'] + counts['early_term']
 
-                # check that a cut-site exists on the end
-                found_lig = False
-                for lig in ligation_variants:
-                    if aseq.endswith(lig.end_match):
-                        found_lig = True
-                        counts['cs_term'] += 1
+        print()
+        print('Total reads analyzed: {}'.format(total))
+        print()
+        print('Fully aligned:   {} {:6.2f}%'.format(counts['full_align'], counts['full_align'] / total * 100))
+        print('    3p cut-site: {} {:6.2f}%'.format(counts['cs_full'], counts['cs_full'] / total * 100))
+        print()
+        print('Early termination: {} {:6.2f}%'.format(counts['early_term'], counts['early_term'] / total * 100))
+        print('    no cut-site:   {} {:6.2f}%'.format(counts['no_site'], counts['no_site'] / total * 100))
+        print('    3p cut-site:   {} {:6.2f}%'.format(counts['cs_term'], counts['cs_term'] / total * 100))
+        print('    3p junction:   {} {:6.2f}%'.format(counts['read_thru'], counts['read_thru'] / total * 100))
+        print()
 
-                        if args.log:
-                            # record those pairs which at least have one cut-site terminated read
-                            pair_log.setdefault(r.query_name, set()).add(
-                                pair_info(ref_names[r.reference_id], r.reference_start, r.reference_length,
-                                          r.is_reverse, r.cigarstring))
-                            if rmate is not None :
-                                if rmate.query_name != r.query_name:
-                                    break
-                                pair_log[r.query_name].add(
-                                    pair_info(ref_names[rmate.reference_id], rmate.reference_start,
-                                              rmate.reference_length, rmate.is_reverse, rmate.cigarstring))
-
-                        # a proximity ligation product should contain a characteristic
-                        # sequence which duplicates a portion of the cut-site. Check
-                        # and see if the read contains this.
-                        # Note: less often, read needs may not have enough remaining seq!
-                        jseq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
-                        if jseq.endswith(lig.junction):
-                            counts['read_thru'] += 1
-
-                            if r.has_tag('SA'):
-                                counts['is_split'] += 1
-                                sec_align = parse_tag(r.get_tag('SA'))
-
-                        break
-
-                if not found_lig:
-                    counts['no_site'] += 1
-
-            except StopIteration as e:
-                break
-    finally:
-        if progress:
-            progress.close()
-
-    total = counts['ref_term'] + counts['full_align'] + counts['early_term']
-
-    print()
-    print('Total reads analyzed: {}'.format(total))
-    print()
-    print('Fully aligned:   {} {:6.2f}%'.format(counts['full_align'], counts['full_align'] / total * 100))
-    print('    3p cut-site: {} {:6.2f}%'.format(counts['cs_full'], counts['cs_full'] / total * 100))
-    print()
-    print('Early termination: {} {:6.2f}%'.format(counts['early_term'], counts['early_term'] / total * 100))
-    print('    no cut-site:   {} {:6.2f}%'.format(counts['no_site'], counts['no_site'] / total * 100))
-    print('    3p cut-site:   {} {:6.2f}%'.format(counts['cs_term'], counts['cs_term'] / total * 100))
-    print('    3p junction:   {} {:6.2f}%'.format(counts['read_thru'], counts['read_thru'] / total * 100))
-    print()
-
-if args.log:
-    print('Writing pairs which contained cut-sites to log...')
-    toml.dump(pair_log, open('pairs_log.toml', 'w'))
+    if args.log:
+        print('Writing pairs which contained cut-sites to log...')
+        toml.dump(pair_log, open('pairs_log.toml', 'w'))
