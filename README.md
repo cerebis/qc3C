@@ -8,7 +8,23 @@ The analysis currently involves inspecting the mapped reads for evidence of cut-
 
 Most enzymes should be known to the software by name (case-sensitive).
 
-Usage: for a library which used both Sau3AI and MluCI restriction enzymes
+Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 ```bash
 > qc3C -e Sau3AI -e MluCI hic_to_ref.bam
+```
+
+Help
+```
+usage: qc3C [-h] [--log] [-t THREADS] -e NEB_NAME BAM
+
+positional arguments:
+  BAM                   Input bam file of Hi-C reads mapped to references
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --log                 Keep a log of pairs with cut-sites
+  -t N, --threads N     Number of threads
+  -e NEB_NAME, --enzyme NEB_NAME
+                        Case-sensitive NEB enzyme name. Use multiple times for
+                        multiple enzymes
 ```
