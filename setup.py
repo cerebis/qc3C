@@ -15,6 +15,13 @@ setuptools.setup(
     url='https://github.com/cerebis/qc3C',
     license='GNU Affero General Public License v3',
 
+    install_requires=[
+        'pysam',
+        'tqdm',
+        'biopython',
+        'toml'
+    ],
+
     classifiers=[
         'Programming Language :: Python :: 2.7',
         'License :: OSI Approved :: GNU Affero General Public License v3',

@@ -1,6 +1,4 @@
 pysam
 tqdm
-intervaltree
 biopython
-numpy
 toml
