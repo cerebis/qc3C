@@ -1,6 +1,4 @@
 import argparse
-import bz2
-import gzip
 import multiprocessing
 import os
 import re
@@ -56,23 +54,6 @@ def parse_tag(_tag):
                 'nm': int(ti[5]),
                 'alen': alen,
                 'total': tot}
-
-
-def open_input(file_name):
-    """
-    Open a text file for input. The filename is used to indicate if it has been
-    compressed. Recognising gzip and bz2.
-
-    :param file_name: the name of the input file
-    :return: open file handle, possibly wrapped in a decompressor
-    """
-    suffix = file_name.split('.')[-1].lower()
-    if suffix == 'bz2':
-        return bz2.BZ2File(file_name, mode='rt')
-    elif suffix == 'gz':
-        return gzip.open(file_name, mode='rt')
-    else:
-        return open(file_name, 'r')
 
 
 class UnknownEnzymeException(Exception):
@@ -190,7 +171,6 @@ def main():
     parser.add_argument('-t', '--threads', type=int, default=None, help='Number of threads')
     parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append', nargs=1,
                         help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
-    parser.add_argument('FASTA', help='Input Fasta of references used in mapping')
     parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
     args = parser.parse_args()
 
@@ -320,6 +300,7 @@ def main():
         print('    no cut-site:   {} {:6.2f}%'.format(counts['no_site'], counts['no_site'] / total * 100))
         print('    3p cut-site:   {} {:6.2f}%'.format(counts['cs_term'], counts['cs_term'] / total * 100))
         print('    3p junction:   {} {:6.2f}%'.format(counts['read_thru'], counts['read_thru'] / total * 100))
+        print('    split align:   {} {:6.2f}%'.format(counts['is_split'], counts['is_split'] / total * 100))
         print()
 
     if args.log:
