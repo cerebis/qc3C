@@ -179,7 +179,7 @@ class qc_info(object):
         self.enzyme = {en: cutsite_info() for en in enzymes}
 
     def total(self):
-        return sum(self._global)
+        return self._global.ref_term + self._global.full_align + self._global.early_term
 
 
 class EncodeCounter(json.JSONEncoder):
@@ -322,16 +322,13 @@ def main():
         print('Ref termination:   {} {:6.2f}%'.format(n, n / total * 100))
         n = report._global.no_site
         print('No cut-site:       {} {:6.2f}%'.format(n, n / total * 100))
-        for en in report.enzyme:
-            n = report.enzyme[en].cs_full
-            print('    {} 3p cut-site: {} {:6.2f}%'.format(en, n, n / total * 100))
         print()
         for en, inf in report.enzyme.items():
             print('Suspected {} ligation products'.format(str(en)))
-            print('  fully with 3p:   {} {:6.2f}%'.format(inf.cs_full, inf.cs_full / total * 100))
-            print('    3p cut-site:   {} {:6.2f}%'.format(inf.cs_term, inf.cs_term / total * 100))
-            print('    3p junction:   {} {:6.2f}%'.format(inf.read_thru, inf.read_thru / total * 100))
-            print('    split align:   {} {:6.2f}%'.format(inf.is_split, inf.is_split / total * 100))
+            print('     cs full:   {} {:6.2f}%'.format(inf.cs_full, inf.cs_full / total * 100))
+            print('     cs term:   {} {:6.2f}%'.format(inf.cs_term, inf.cs_term / total * 100))
+            print('   read thru:   {} {:6.2f}%'.format(inf.read_thru, inf.read_thru / total * 100))
+            print(' split align:   {} {:6.2f}%'.format(inf.is_split, inf.is_split / total * 100))
         print()
 
     if args.log:
