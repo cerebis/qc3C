@@ -198,7 +198,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', action='store_true', default=False, help='Keep a log of pairs with cut-sites')
-    parser.add_argument('-t', '--threads', metavar='N', type=int, default=None, help='Number of threads')
+    parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
     parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
                         help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
     parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
@@ -210,7 +210,7 @@ def main():
     for ename in args.enzyme:
         ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename)))
 
-    with pysam.AlignmentFile(args.BAM, 'rb') as bam_file:
+    with pysam.AlignmentFile(args.BAM, 'rb', threads=args.threads) as bam_file:
 
         ref_lengths = [li for li in bam_file.lengths]
         ref_names = [ni for ni in bam_file.references]
