@@ -1,20 +1,22 @@
 import argparse
+import json
 import multiprocessing
 import os
 import re
 import subprocess
 from collections import namedtuple
+from collections.abc import Collection
 from difflib import SequenceMatcher
 
 import pysam
 import tqdm
-import toml
 from Bio.Restriction import Restriction
+from recordclass import recordclass
 
 __version__ = '0.1'
 
 
-ligation_info = namedtuple('ligation_info', ('junction', 'end_match', 'junc_len', 'site_len'))
+ligation_info = namedtuple('ligation_info', ('enzyme_name', 'junction', 'end_match', 'junc_len', 'site_len'))
 
 pair_info = namedtuple('pair_info', ('name', 'pos', 'length', 'is_reverse', 'cigarstring'))
 
@@ -116,7 +118,7 @@ def ligation_junction_seq(enz, spacer=''):
         end5, end3 = enz.site[:enz.fst5], enz.site[enz.fst3:]
         site = site[:enz.fst3]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
-    return ligation_info(junc, site, len(junc), len(site))
+    return ligation_info(str(enz), junc, site, len(junc), len(site))
 
 
 def get_forward_strand(r):
@@ -164,32 +166,51 @@ def count_bam_reads(file_name, max_cpu=None):
     return int(proc.stdout.readline())
 
 
+global_info = recordclass('global_info', ('ref_term', 'no_site', 'full_align', 'early_term'), defaults=(0,)*4)
+cutsite_info = recordclass('cutsite_info', ('cs_term', 'cs_full', 'read_thru', 'is_split'), defaults=(0,)*4)
+
+
+class qc_info(object):
+
+    def __init__(self, enzymes):
+        if not isinstance(enzymes, Collection) or isinstance(enzymes, str):
+            enzymes = [enzymes]
+        self._global = global_info()
+        self.enzyme = {en: cutsite_info() for en in enzymes}
+
+    def total(self):
+        return sum(self._global)
+
+
+class EncodeCounter(json.JSONEncoder):
+    def default(self, o):
+        print(o.__class__, o.__class__.__bases__)
+        if isinstance(o, qc_info):
+            d = o._asdict()
+            d.update({'enzyme': o.enzyme})
+            return d
+        if isinstance(o, cutsite_info):
+            return o._asdict()
+        raise TypeError()
+
+
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', action='store_true', default=False, help='Keep a log of pairs with cut-sites')
-    parser.add_argument('-t', '--threads', type=int, default=None, help='Number of threads')
-    parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append', nargs=1,
+    parser.add_argument('-t', '--threads', metavar='N', type=int, default=None, help='Number of threads')
+    parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
                         help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
     parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
     args = parser.parse_args()
 
+    report = qc_info(args.enzyme)
+
     ligation_variants = []
     for ename in args.enzyme:
-        ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename[0])))
+        ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename)))
 
     with pysam.AlignmentFile(args.BAM, 'rb') as bam_file:
-
-        counts = {
-            'ref_term': 0,
-            'full_align': 0,
-            'early_term': 0,
-            'cs_term': 0,
-            'cs_full': 0,
-            'read_thru': 0,
-            'is_split': 0,
-            'no_site': 0,
-        }
 
         ref_lengths = [li for li in bam_file.lengths]
         ref_names = [ni for ni in bam_file.references]
@@ -224,21 +245,21 @@ def main():
 
                     if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
                         # reads which align to the ends of references are ignored
-                        counts['ref_term'] += 1
+                        report._global.ref_term += 1
                         continue
 
                     if r.query_length == r.reference_length:
-                        counts['full_align'] += 1
+                        report._global.full_align += 1
                         # fully aligned reads can't be tested for the junction but
                         # we can still test for the cut-site
                         seq = get_forward_strand(r)
                         for lig in ligation_variants:
                             if seq.endswith(lig.end_match):
-                                counts['cs_full'] += 1
+                                report.enzyme[lig.enzyme_name].cs_full += 1
                                 break
                         continue
 
-                    counts['early_term'] += 1
+                    report._global.early_term += 1
 
                     # inspect all sequences in as 5'-3'
                     seq = get_forward_strand(r)
@@ -251,7 +272,7 @@ def main():
                     for lig in ligation_variants:
                         if aseq.endswith(lig.end_match):
                             found_lig = True
-                            counts['cs_term'] += 1
+                            report.enzyme[lig.enzyme_name].cs_term += 1
 
                             if args.log:
                                 # record those pairs which at least have one cut-site terminated read
@@ -271,16 +292,16 @@ def main():
                             # Note: less often, read needs may not have enough remaining seq!
                             jseq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
                             if jseq.endswith(lig.junction):
-                                counts['read_thru'] += 1
+                                report.enzyme[lig.enzyme_name].read_thru += 1
 
                                 if r.has_tag('SA'):
-                                    counts['is_split'] += 1
-                                    sec_align = parse_tag(r.get_tag('SA'))
+                                    report.enzyme[lig.enzyme_name].is_split += 1
+                                    # sec_align = parse_tag(r.get_tag('SA'))
 
                             break
 
                     if not found_lig:
-                        counts['no_site'] += 1
+                        report._global.no_site += 1
 
                 except StopIteration as e:
                     break
@@ -288,21 +309,31 @@ def main():
             if progress:
                 progress.close()
 
-        total = counts['ref_term'] + counts['full_align'] + counts['early_term']
+        total = report.total()
 
         print()
         print('Total reads analyzed: {}'.format(total))
         print()
-        print('Fully aligned:   {} {:6.2f}%'.format(counts['full_align'], counts['full_align'] / total * 100))
-        print('    3p cut-site: {} {:6.2f}%'.format(counts['cs_full'], counts['cs_full'] / total * 100))
+        n = report._global.full_align
+        print('Fully aligned:     {} {:6.2f}%'.format(n, n / total * 100))
+        n = report._global.early_term
+        print('Early termination: {} {:6.2f}%'.format(n, n / total * 100))
+        n = report._global.ref_term
+        print('Ref termination:   {} {:6.2f}%'.format(n, n / total * 100))
+        n = report._global.no_site
+        print('No cut-site:       {} {:6.2f}%'.format(n, n / total * 100))
+        for en in report.enzyme:
+            n = report.enzyme[en].cs_full
+            print('    {} 3p cut-site: {} {:6.2f}%'.format(en, n, n / total * 100))
         print()
-        print('Early termination: {} {:6.2f}%'.format(counts['early_term'], counts['early_term'] / total * 100))
-        print('    no cut-site:   {} {:6.2f}%'.format(counts['no_site'], counts['no_site'] / total * 100))
-        print('    3p cut-site:   {} {:6.2f}%'.format(counts['cs_term'], counts['cs_term'] / total * 100))
-        print('    3p junction:   {} {:6.2f}%'.format(counts['read_thru'], counts['read_thru'] / total * 100))
-        print('    split align:   {} {:6.2f}%'.format(counts['is_split'], counts['is_split'] / total * 100))
+        for en, inf in report.enzyme.items():
+            print('Suspected {} ligation products'.format(str(en)))
+            print('  fully with 3p:   {} {:6.2f}%'.format(inf.cs_full, inf.cs_full / total * 100))
+            print('    3p cut-site:   {} {:6.2f}%'.format(inf.cs_term, inf.cs_term / total * 100))
+            print('    3p junction:   {} {:6.2f}%'.format(inf.read_thru, inf.read_thru / total * 100))
+            print('    split align:   {} {:6.2f}%'.format(inf.is_split, inf.is_split / total * 100))
         print()
 
     if args.log:
         print('Writing pairs which contained cut-sites to log...')
-        toml.dump(pair_log, open('pairs_log.toml', 'w'))
+        json.dump(pair_log, open('pairs_log.toml', 'w'))

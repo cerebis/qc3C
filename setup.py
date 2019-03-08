@@ -19,11 +19,11 @@ setuptools.setup(
         'pysam',
         'tqdm',
         'biopython',
-        'toml'
+        'recordclass',
     ],
 
     classifiers=[
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.6',
         'License :: OSI Approved :: GNU Affero General Public License v3',
         'Operating System :: POSIX :: Linux',
         'Intended Audience :: Science/Research',
