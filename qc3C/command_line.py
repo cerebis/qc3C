@@ -112,10 +112,17 @@ def ligation_junction_seq(enz, spacer=''):
     :params enz: biopython restriction instance
     :params spacer: optional string with which to separate site elements (debugging)
     """
+    assert not enz.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
+
     end5, end3 = '', ''
     site = str(enz.site)
-    if enz.ovhg % enz.size != 0:
-        end5, end3 = enz.site[:enz.fst5], enz.site[enz.fst3:]
+
+    ovhg_size = abs(enz.ovhg)
+    if ovhg_size > 0 and ovhg_size != enz.size:
+        a = abs(enz.fst5)
+        if a > enz.size // 2:
+            a = enz.size - a
+        end5, end3 = enz.site[:a], enz.site[-a:]
         site = site[:enz.fst3]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
     return ligation_info(str(enz), junc, site, len(junc), len(site))
@@ -170,7 +177,7 @@ global_info = recordclass('global_info', ('ref_term', 'no_site', 'full_align', '
 cutsite_info = recordclass('cutsite_info', ('cs_term', 'cs_full', 'read_thru', 'is_split'), defaults=(0,)*4)
 
 
-class qc_info(object):
+class QcInfo(object):
 
     def __init__(self, enzymes):
         if not isinstance(enzymes, Collection) or isinstance(enzymes, str):
@@ -185,7 +192,7 @@ class qc_info(object):
 class EncodeCounter(json.JSONEncoder):
     def default(self, o):
         print(o.__class__, o.__class__.__bases__)
-        if isinstance(o, qc_info):
+        if isinstance(o, QcInfo):
             d = o._asdict()
             d.update({'enzyme': o.enzyme})
             return d
@@ -197,14 +204,16 @@ class EncodeCounter(json.JSONEncoder):
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--log', action='store_true', default=False, help='Keep a log of pairs with cut-sites')
+    # parser.add_argument('-l', '--pairs-log', action='store_true', default=False,
+    #                     help='Keep a JSON format log of pairs found with cut-site evidence')
+    # parser.add_argument('--log-path', default='pairs-log.toml', help='Set path of the pairs log [pairs-log.toml]')
     parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
     parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
                         help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
     parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
     args = parser.parse_args()
 
-    report = qc_info(args.enzyme)
+    report = QcInfo(args.enzyme)
 
     ligation_variants = []
     for ename in args.enzyme:
@@ -213,12 +222,12 @@ def main():
     with pysam.AlignmentFile(args.BAM, 'rb', threads=args.threads) as bam_file:
 
         ref_lengths = [li for li in bam_file.lengths]
-        ref_names = [ni for ni in bam_file.references]
+        # ref_names = [ni for ni in bam_file.references]
 
-        pair_log = {}
+        # pair_log = {}
 
-        rmate = None
-        prev_r = None
+        # rmate = None
+        # prev_r = None
 
         progress = None
         try:
@@ -235,13 +244,13 @@ def main():
                     r = next(bam_iter)
                     progress.update()
 
-                    if args.log:
-                        if prev_r is not None:
-                            if r.query_name == prev_r.query_name:
-                                rmate = prev_r
-                            else:
-                                rmate = None
-                        prev_r = r
+                    # if args.log:
+                    #     if prev_r is not None:
+                    #         if r.query_name == prev_r.query_name:
+                    #             rmate = prev_r
+                    #         else:
+                    #             rmate = None
+                    #     prev_r = r
 
                     if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
                         # reads which align to the ends of references are ignored
@@ -274,17 +283,17 @@ def main():
                             found_lig = True
                             report.enzyme[lig.enzyme_name].cs_term += 1
 
-                            if args.log:
-                                # record those pairs which at least have one cut-site terminated read
-                                pair_log.setdefault(r.query_name, set()).add(
-                                    pair_info(ref_names[r.reference_id], r.reference_start, r.reference_length,
-                                              r.is_reverse, r.cigarstring))
-                                if rmate is not None :
-                                    if rmate.query_name != r.query_name:
-                                        break
-                                    pair_log[r.query_name].add(
-                                        pair_info(ref_names[rmate.reference_id], rmate.reference_start,
-                                                  rmate.reference_length, rmate.is_reverse, rmate.cigarstring))
+                            # if args.log:
+                            #     # record those pairs which at least have one cut-site terminated read
+                            #     pair_log.setdefault(r.query_name, set()).add(
+                            #         pair_info(ref_names[r.reference_id], r.reference_start, r.reference_length,
+                            #                   r.is_reverse, r.cigarstring))
+                            #     if rmate is not None :
+                            #         if rmate.query_name != r.query_name:
+                            #             break
+                            #         pair_log[r.query_name].add(
+                            #             pair_info(ref_names[rmate.reference_id], rmate.reference_start,
+                            #                       rmate.reference_length, rmate.is_reverse, rmate.cigarstring))
 
                             # a proximity ligation product should contain a characteristic
                             # sequence which duplicates a portion of the cut-site. Check
@@ -331,6 +340,6 @@ def main():
             print(' split align:   {} {:6.2f}%'.format(inf.is_split, inf.is_split / total * 100))
         print()
 
-    if args.log:
-        print('Writing pairs which contained cut-sites to log...')
-        json.dump(pair_log, open('pairs_log.toml', 'w'))
+    # if args.log:
+    #     print('Writing pairs which contained cut-sites to log...')
+    #     json.dump(pair_log, open('pairs_log.toml', 'w'))
