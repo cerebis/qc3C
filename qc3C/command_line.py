@@ -8,6 +8,7 @@ from collections import namedtuple
 from collections.abc import Collection
 from difflib import SequenceMatcher
 
+import pandas
 import pysam
 import tqdm
 from Bio.Restriction import Restriction
@@ -16,16 +17,67 @@ from recordclass import recordclass
 __version__ = '0.1'
 
 
-ligation_info = namedtuple('ligation_info', ('enzyme_name', 'junction', 'end_match', 'junc_len', 'site_len'))
+# immutable type used in storing information about enzymatic byproducts in proximity ligation
+LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'end_match', 'junc_len', 'site_len'))
+# immutable type used in pair logging
+PairInfo = namedtuple('pair_info', ('name', 'pos', 'length', 'is_reverse', 'cigarstring'))
 
-pair_info = namedtuple('pair_info', ('name', 'pos', 'length', 'is_reverse', 'cigarstring'))
+# mutable tuples used in storing counting statistics on evidence of proximity ligation events.
+# information pertaining to the entire read-set
+GlobalInfo = recordclass('global_info',
+                         ('ref_term', 'no_site', 'full_align', 'early_term', 'total'),
+                         defaults=(0,) * 5)
+
+# information specific an enzyme's action
+CutSiteInfo = recordclass('cutsite_info',
+                          ('cs_term', 'cs_full', 'read_thru', 'is_split'),
+                          defaults=(0,) * 4)
+
+
+class QcInfo(object):
+
+    class EncodeCounter(json.JSONEncoder):
+        def default(self, o):
+            print(o.__class__, o.__class__.__bases__)
+            if isinstance(o, QcInfo):
+                d = o._asdict()
+                d.update({'enzyme': o.enzyme})
+                return d
+            if isinstance(o, CutSiteInfo):
+                return o._asdict()
+            raise TypeError()
+
+    """
+    Represents the evidence collected for the action of Hi-C proximity ligation
+    over an entire BAM file.
+    """
+    def __init__(self, enzymes):
+        """
+        :param enzymes: the enzymes used in creating the Hi-C library
+        """
+        if not isinstance(enzymes, Collection) or isinstance(enzymes, str):
+            enzymes = [enzymes]
+        self._global = GlobalInfo()
+        self.enzyme = {en: CutSiteInfo() for en in enzymes}
+
+    def total(self):
+        """
+        :return: the total number of reads
+        """
+        return self._global.total
+
+    def mapped(self):
+        """
+        :return: the total number of mapped reads
+        """
+        return self._global.ref_term + self._global.full_align + self._global.early_term
+
 
 # Mapping of cigar characters to code values
 CODE2CIGAR = dict((y, x) for x, y in enumerate("MIDNSHP=X"))
 
 # Pattern that finds each unit of a cigar i.e. 10M or 9H
 CIGAR_ANY = re.compile(r"(\d+)([MIDNSHP=X])")
-
 
 def cigar_to_tuple(cigar):
     """
@@ -125,7 +177,7 @@ def ligation_junction_seq(enz, spacer=''):
         end5, end3 = enz.site[:a], enz.site[-a:]
         site = site[:-a]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
-    return ligation_info(str(enz), junc, site, len(junc), len(site))
+    return LigationInfo(str(enz), junc, site, len(junc), len(site))
 
 
 def get_forward_strand(r):
@@ -173,32 +225,41 @@ def count_bam_reads(file_name, max_cpu=None):
     return int(proc.stdout.readline())
 
 
-global_info = recordclass('global_info', ('ref_term', 'no_site', 'full_align', 'early_term'), defaults=(0,)*4)
-cutsite_info = recordclass('cutsite_info', ('cs_term', 'cs_full', 'read_thru', 'is_split'), defaults=(0,)*4)
+def print_report(report, output=None, sep='\t'):
+    """
+    Create a tabular report in CSV format
+    :param report: the QcInfo instance to report
+    :param output: if None print the table to stdout, otherwise to the specified path
+    :param sep: separator to use in table creation
+    """
 
+    total = report.mapped()
+    _cnames = ['enzyme', 'variable', 'read_count', 'vs_total', 'vs_mapped']
 
-class QcInfo(object):
+    df = pandas.DataFrame([['all', 'total', total, None, None],
+                           ['all', 'mapped', report.mapped(), None, None],
+                           ['all', 'fully aligned', report._global.full_align, None, None],
+                           ['all', 'early termination', report._global.early_term, None, None],
+                           ['all', 'ref termination', report._global.ref_term, None, None],
+                           ['all', 'no cutsite', report._global.no_site, None, None]],
+                          columns=_cnames)
 
-    def __init__(self, enzymes):
-        if not isinstance(enzymes, Collection) or isinstance(enzymes, str):
-            enzymes = [enzymes]
-        self._global = global_info()
-        self.enzyme = {en: cutsite_info() for en in enzymes}
+    for enz, inf in report.enzyme.items():
+        df_enz = pandas.DataFrame([[enz, 'cs fully aligned', inf.cs_full, None, None],
+                                   [enz, 'cs termination', inf.cs_term, None, None],
+                                   [enz, 'read-thru', inf.read_thru, None, None],
+                                   [enz, 'split alignment', inf.is_split, None, None]],
+                                  columns=_cnames)
+        df = df.append(df_enz, ignore_index=True)
 
-    def total(self):
-        return self._global.ref_term + self._global.full_align + self._global.early_term
+    df.loc[1:, 'vs_total'] = df.loc[1:, 'read_count'] / df.loc[0, 'read_count'] * 100
+    df.loc[2:, 'vs_mapped'] = df.loc[2:, 'read_count'] / df.loc[1, 'read_count'] * 100
+    df[['vs_total', 'vs_mapped']] = df[['vs_total', 'vs_mapped']].apply(pandas.to_numeric)
 
-
-class EncodeCounter(json.JSONEncoder):
-    def default(self, o):
-        print(o.__class__, o.__class__.__bases__)
-        if isinstance(o, QcInfo):
-            d = o._asdict()
-            d.update({'enzyme': o.enzyme})
-            return d
-        if isinstance(o, cutsite_info):
-            return o._asdict()
-        raise TypeError()
+    if output is None:
+        print(df.to_csv(None, sep=sep, float_format="%.2f", index=False))
+    else:
+        df.to_csv(output, sep=sep, float_format="%.2f", index=False)
 
 
 def main():
@@ -207,7 +268,9 @@ def main():
     # parser.add_argument('-l', '--pairs-log', action='store_true', default=False,
     #                     help='Keep a JSON format log of pairs found with cut-site evidence')
     # parser.add_argument('--log-path', default='pairs-log.toml', help='Set path of the pairs log [pairs-log.toml]')
+    parser.add_argument('--sep', default='\t', help='Delimiter to use in report table')
     parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
+    parser.add_argument('-o', '--output', metavar='PATH', default=None, help='Output CSV report to a file')
     parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
                         help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
     parser.add_argument('BAM', help='Input bam file of Hi-C reads mapped to references')
@@ -243,6 +306,10 @@ def main():
                 try:
                     r = next(bam_iter)
                     progress.update()
+
+                    # report._global.total += 1
+                    # if r.is_unmapped:
+                    #     continue
 
                     # if args.log:
                     #     if prev_r is not None:
@@ -318,27 +385,7 @@ def main():
             if progress:
                 progress.close()
 
-        total = report.total()
-
-        print()
-        print('Total reads analyzed: {}'.format(total))
-        print()
-        n = report._global.full_align
-        print('Fully aligned:     {} {:6.2f}%'.format(n, n / total * 100))
-        n = report._global.early_term
-        print('Early termination: {} {:6.2f}%'.format(n, n / total * 100))
-        n = report._global.ref_term
-        print('Ref termination:   {} {:6.2f}%'.format(n, n / total * 100))
-        n = report._global.no_site
-        print('No cut-site:       {} {:6.2f}%'.format(n, n / total * 100))
-        print()
-        for en, inf in report.enzyme.items():
-            print('Suspected {} ligation products'.format(str(en)))
-            print('     cs full:   {} {:6.2f}%'.format(inf.cs_full, inf.cs_full / total * 100))
-            print('     cs term:   {} {:6.2f}%'.format(inf.cs_term, inf.cs_term / total * 100))
-            print('   read thru:   {} {:6.2f}%'.format(inf.read_thru, inf.read_thru / total * 100))
-            print(' split align:   {} {:6.2f}%'.format(inf.is_split, inf.is_split / total * 100))
-        print()
+    print_report(report, args.output, args.sep)
 
     # if args.log:
     #     print('Writing pairs which contained cut-sites to log...')
