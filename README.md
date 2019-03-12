@@ -15,14 +15,17 @@ Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 
 Help
 ```
-usage: qc3C [-h] [-t THREADS] -e NEB_NAME BAM
+usage: qc3C [-h] [--sep SEP] [-t N] [-o PATH] -e NEB_NAME BAM
 
 positional arguments:
   BAM                   Input bam file of Hi-C reads mapped to references
 
 optional arguments:
   -h, --help            show this help message and exit
+  --sep SEP             Delimiter to use in report table
   -t N, --threads N     Number of threads
+  -o PATH, --output PATH
+                        Output CSV report to a file
   -e NEB_NAME, --enzyme NEB_NAME
                         Case-sensitive NEB enzyme name. Use multiple times for
                         multiple enzymes
