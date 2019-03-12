@@ -35,6 +35,10 @@ CutSiteInfo = recordclass('cutsite_info',
 
 
 class QcInfo(object):
+    """
+    Represents the evidence collected for the action of Hi-C proximity ligation
+    over an entire BAM file.
+    """
 
     class EncodeCounter(json.JSONEncoder):
         def default(self, o):
@@ -47,10 +51,6 @@ class QcInfo(object):
                 return o._asdict()
             raise TypeError()
 
-    """
-    Represents the evidence collected for the action of Hi-C proximity ligation
-    over an entire BAM file.
-    """
     def __init__(self, enzymes):
         """
         :param enzymes: the enzymes used in creating the Hi-C library
@@ -88,7 +88,16 @@ def cigar_to_tuple(cigar):
     return [(CODE2CIGAR[t[1]], int(t[0])) for t in CIGAR_ANY.findall(cigar)]
 
 
-def parse_tag(_tag):
+def parse_secondary_alignment_tag(r):
+    """
+    Extract the secondary alignment tag (SA) information.
+    :param r: the read to inspect
+    :return: dictionary of fields extracted from the SA tag, or None if no SA tag exists
+    """
+    if not r.has_tag('SA'):
+        return None
+
+    _tag = r.get_tag('SA')
     for aln_i in _tag.split(';'):
         if not aln_i:
             continue
@@ -370,9 +379,10 @@ def main():
                             if jseq.endswith(lig.junction):
                                 report.enzyme[lig.enzyme_name].read_thru += 1
 
-                                if r.has_tag('SA'):
+                                sa_dict = parse_secondary_alignment_tag(r)
+                                if sa_dict is not None:
+                                    # TODO either use this inforation to stop parsing.
                                     report.enzyme[lig.enzyme_name].is_split += 1
-                                    # sec_align = parse_tag(r.get_tag('SA'))
 
                             break
 
