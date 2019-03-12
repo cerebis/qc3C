@@ -123,7 +123,7 @@ def ligation_junction_seq(enz, spacer=''):
         if a > enz.size // 2:
             a = enz.size - a
         end5, end3 = enz.site[:a], enz.site[-a:]
-        site = site[:enz.fst3]
+        site = site[:-a]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
     return ligation_info(str(enz), junc, site, len(junc), len(site))
 
