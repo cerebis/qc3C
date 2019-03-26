@@ -6,7 +6,7 @@ __pycache__/
 *$py.class
 
 include/
-.idea
+.idea/
 
 # C extensions
 *.so
