@@ -1,5 +1,5 @@
+#!/usr/bin/env python3
 import numpy as np
-import dna_jellyfish
 import tqdm
 import pandas
 import subprocess
@@ -7,20 +7,36 @@ import bz2
 import gzip
 from collections import namedtuple
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_id', 'ix'])
+try:
+    import dna_jellyfish
+except ImportError:
+    import jellyfish as dna_jellyfish
+
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type']) #, 'read_id', 'ix'])
 
 
 def collect_coverage(seq, ix, site_size, k):
+    """
+    Collect the k-mer coverage centered around the position ix. From the left, the sliding
+    window begins just before the site region and slides right until just after. Means
+    are then calculated for the inner (within the junction) and outer (left and right flanks)
+    :param seq: the sequence to analyze
+    :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
+    :param site_size: the size of the junction site
+    :param k: the kmer size
+    :return: mean(inner), mean(outer)
+    """
     assert k <= ix <= len(seq) - (k + site_size), \
         'The site index {} is either too close to start (min {}) or ' \
         'end (max {}) of read to scan for coverage'.format(ix, k, len(seq) - (k + site_size))
-    dat = []
+
+    sliding_cov = np.zeros(shape=k+site_size+1, dtype=np.int)
     for i in range(-k, site_size+1):
         smer = seq[ix+i:ix+i+k]
         mer = dna_jellyfish.MerDNA(smer)
         mer.canonicalize()
-        dat.append(query_jf[mer])
-    return np.array(dat)
+        sliding_cov[i] = query_jf[mer]
+    return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
 
 def open_input(file_name):
@@ -123,19 +139,30 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser('Prototype kmer analyzer')
+    parser.add_argument('-s', '--seed', type=int, help='Random seed used in sampling the read-set')
     parser.add_argument('--max-n', default=500000, type=int, help='Stop after collecting N samples')
+    parser.add_argument('--max-coverage', default=500, type=int, help='Ignore regions with more than this coverage')
+    parser.add_argument('--p-value', default=0.05, type=float, help='p-value threshold for Hi-C junctions')
+    parser.add_argument('-o', '--output', help='Output the table of observations to a file')
     parser.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
     parser.add_argument('SITE', help='Junction site')
     parser.add_argument('FASTQ', help='FastQ file used in making the kmer database')
     parser.add_argument('KMER_DB', help='Jellyfish kmer database')
-    parser.add_argument('OUTPUT', help='Output table name')
     args = parser.parse_args()
 
     max_reads = int(args.max_n)
-    k_size = args.KMER_SIZE
+
+    # We will treat all sequence in upper case
     site = args.SITE.upper()
-    flank_size = (k_size - 8) // 2
     site_size = len(site)
+
+    k_size = args.KMER_SIZE
+    # TODO for flexible flanks could be handled if L/R flanks treated independently
+    flank_size = (k_size - site_size) // 2
+
+    # some sanity checks.
+    assert k_size - site_size > 0, 'Kmer size must be larger the the junction size'
+    assert (k_size - site_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
 
     # initialize jellyfish API
     dna_jellyfish.MerDNA_k(k_size)
@@ -145,23 +172,34 @@ if __name__ == "__main__":
     # accommodate the sliding window.
     # kmer_patt = re.compile('[^N]{{{0},}}({1})[^N]{{{0},}}'.format(k_size, site))
 
-    OUTER_IX = np.array([True] * (flank_size+2) + [False] * (site_size*2 + 1 - 4) + [True] * (flank_size+2))
+    OUTER_IX = np.array([True] * (flank_size+2) +
+                        [False] * (site_size*2 + 1 - 4) +
+                        [True] * (flank_size+2), dtype=np.bool)
     INNER_IX = ~ OUTER_IX
 
     print('Counting FastQ reads...')
     n_reads = count_fastq_sequences(args.FASTQ)
-    print('Analyzing {} reads'.format(n_reads))
+    print('Found {} reads'.format(n_reads))
 
     # probability of acceptance for subsampling
-    p_accept = 1 if max_reads >= n_reads else max_reads / n_reads * 10
-    print('Acceptance threshold: {:.2e}'.format(p_accept))
+    p_accept = 1.0 if max_reads >= n_reads*10 else max_reads / n_reads * 10
+    print('Acceptance threshold: {:.2f}'.format(p_accept))
 
-    unif = np.random.uniform
+    # set up random number generation
+    if args.seed is None:
+        args.seed = np.random.randint(1000000, 99999999)
+        print('Random seed was not set, using {}'.format(args.seed))
+    else:
+        print('Random seed was {}'.format(args.seed))
+    random_state = np.random.RandomState(args.seed)
+    unif = random_state.uniform
+    randint = random_state.randint
 
     with tqdm.tqdm(total=max_reads) as progress:
 
-        n = 0
-        cov_dat = []
+        cov_obs = []
+
+        # set up the generator over FastQ reads
         fq_reader = next_read(readfq(open_input(args.FASTQ)), site, k_size)
         while True:
             try:
@@ -173,10 +211,6 @@ if __name__ == "__main__":
 
             # subsample over entire read set to fulfill quota
             if unif() > p_accept:
-                continue
-
-            # TODO temp fudge as it seems we have a mixture of MluCI and Sau3AI
-            if 'AATTAATT' in seq:
                 continue
 
             # if the read contains no junction, we might still use it
@@ -191,11 +225,9 @@ if __name__ == "__main__":
                 # ambiguous bases. Skip the read if we fail in a few attempts
                 _attempts = 0
                 while _attempts < 3:
-                    ix = np.random.randint(k_size, seq_len - (k_size + site_size)+1)
-                    subseq = seq[ix - k_size: ix + k_size + site_size]
+                    ix = randint(k_size, seq_len - (k_size + site_size)+1)
                     # if no N within the subsequence, then accept it
-
-                    if 'N' not in subseq:
+                    if 'N' not in seq[ix - k_size: ix + k_size + site_size]:
                         break
                     # otherwise keep trying
                     _attempts += 1
@@ -214,15 +246,23 @@ if __name__ == "__main__":
 
                 rtype = 'hic'
 
-            cov = collect_coverage(seq, ix, site_size, k_size)
+            mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size)
 
-            cov_dat.append(CovInfo(np.mean(cov[INNER_IX]), np.mean(cov[OUTER_IX]), rtype, _id, ix))
+            # avoid regions with pathologically high coverage
+            if mean_outer > args.max_coverage:
+                continue
+
+            # record this observation
+            cov_obs.append(CovInfo(mean_inner, mean_outer, rtype)) #, _id, ix))
             progress.update()
 
-            if args.max_n is not None and len(cov_dat) == args.max_n:
+            # if we have reached a requested number of observations
+            # then stop processing
+            if args.max_n is not None and len(cov_obs) == args.max_n:
                 break
 
-    df = pandas.DataFrame(cov_dat)
+    # lets do some tabular munging
+    df = pandas.DataFrame(cov_obs)
 
     # remove any row which had zero coverage in inner or outer region
     z_inner = df.mean_inner == 0
@@ -232,20 +272,35 @@ if __name__ == "__main__":
     print('Rows removed with coverage: inner {}, outer {}, shared {}'.format(
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
+    n_sampled = len(df)
+
     df['ratio'] = df.mean_inner / df.mean_outer
     df.sort_values('ratio', inplace=True)
 
-    print('Initially collected:')
-    print(df.groupby('read_type').size())
+    agg_type = df.groupby('read_type').size()
+    print('Collected observation breakdown. WGS: {} Hi-C: {}'.format(agg_type.wgs, agg_type.hic))
 
+    # the suspected non-hic observations
     wgs = df.loc[df.read_type == 'wgs'].copy()
-    hic = df.loc[df.read_type == 'hic'].copy()
-    hic['pvalue'] = None
-
     wgs.reset_index(inplace=True, drop=True)
     wgs['pvalue'] = 1.0 / len(wgs) * (wgs.index + 1)
 
-    df = wgs.append(hic)
-    df.sort_values('ratio', inplace=True)
-    df.reset_index(inplace=True, drop=True)
-    df.to_csv(args.OUTPUT, sep='\t')
+    # the suspected hi-c observations
+    hic = df.loc[df.read_type == 'hic'].copy()
+    hic['pvalue'] = None
+
+    # combine them together
+    if args.output is not None:
+        print('Writing observations to gzipped csv file: {}'.format(args.output))
+        df = wgs.append(hic)
+        df.sort_values('ratio', inplace=True)
+        df.reset_index(inplace=True, drop=True)
+        df.to_csv(gzip.open(args.output, 'wt'), sep='\t')
+
+    # compute the number of HiC reads exceeding a p-value threshold
+    wgs_pval_ratio = wgs.iloc[(wgs['pvalue'] < args.p_value).sum()].ratio
+    n_hic = (hic.ratio < wgs_pval_ratio).sum()
+
+    # report as a fraction of all n_reads
+    print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
+        args.p_value, n_hic, n_sampled, n_hic / n_sampled))
