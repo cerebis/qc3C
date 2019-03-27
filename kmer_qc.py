@@ -12,7 +12,7 @@ try:
 except ImportError:
     import jellyfish as dna_jellyfish
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type']) #, 'read_id', 'ix'])
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type'])
 
 
 def collect_coverage(seq, ix, site_size, k):
@@ -56,8 +56,13 @@ def open_input(file_name):
         return open(file_name, 'rt')
 
 
-def readfq(fp):  # this is a generator function
-
+def readfq(fp):
+    """
+    Method to quickly read FastA or FastQ files using a generator function.
+    Originally sourced from https://github.com/lh3/readfq
+    :param fp:
+    :return:
+    """
     last = None  # this is a buffer keeping the last unprocessed line
 
     while True:  # mimic closure; is it a bad idea?
@@ -95,31 +100,45 @@ def readfq(fp):  # this is a generator function
                 break
 
 
-def next_read(reader, site, k_size):
-
+def next_read(filename, site, k_size, prob_accept):
+    """
+    Create a generator function which returns sequence data site positions
+    from a FastQ file.
+    :param filename: the fastq file, compressed or not
+    :param site: the target site to find in reads, eg GATCGATC
+    :param k_size: the k-mer size used in the counting database
+    :param prob_accept: probability threshold used to subsample the full read-set
+    :return: yield tuple of (sequence, site_position, read_id, sequence length)
+    """
+    reader = readfq(open_input(filename))
     site_size = len(site)
 
     for _id, _seq, _qual in reader:
         seq_len = len(_seq)
-        if seq_len < 2*k_size + site_size + 1:
+        # skip sequences which are too short to analyze
+        if seq_len < 2 * k_size + site_size + 1:
             continue
+        # subsampling read-set
+        if unif() > prob_accept:
+            continue
+        # search for the site
         _seq = _seq.upper()
         _ix = _seq.find(site)
         # no site found
         if _ix == -1:
-            yield(_seq, None, _id, seq_len)
+            yield _seq, None, _id, seq_len
         # only report sites which meet flank constraints
         elif k_size <= _ix <= (seq_len - (k_size + site_size)):
-            yield(_seq, _ix, _id, seq_len)
+            yield _seq, _ix, _id, seq_len
 
 
 def count_fastq_sequences(file_name):
     """
-    Estimate the number of fasta sequences in a file by counting headers. Decompression is automatically attempted
-    for files ending in .gz. Counting and decompression is by why of subprocess calls to grep and gzip. Uncompressed
-    files are also handled. This is about 8 times faster than parsing a file with BioPython and 6 times faster
-    than reading all lines in Python.
-
+    Estimate the number of fasta sequences in a file by counting headers. Decompression
+    is automatically attempted for files ending in .gz. Counting and decompression is by
+    way of subprocess calls to grep and gzip. Uncompressed files are also handled. This
+    is about 8 times faster than parsing a file with BioPython and 6 times faster than
+    reading all lines in Python.
     :param file_name: the fasta file to inspect
     :return: the estimated number of records
     """
@@ -168,10 +187,6 @@ if __name__ == "__main__":
     dna_jellyfish.MerDNA_k(k_size)
     query_jf = dna_jellyfish.QueryMerFile(args.KMER_DB)
 
-    # When finding junction site in reads, the flanks must be big enough to
-    # accommodate the sliding window.
-    # kmer_patt = re.compile('[^N]{{{0},}}({1})[^N]{{{0},}}'.format(k_size, site))
-
     OUTER_IX = np.array([True] * (flank_size+2) +
                         [False] * (site_size*2 + 1 - 4) +
                         [True] * (flank_size+2), dtype=np.bool)
@@ -182,8 +197,8 @@ if __name__ == "__main__":
     print('Found {} reads'.format(n_reads))
 
     # probability of acceptance for subsampling
-    p_accept = 1.0 if max_reads >= n_reads*10 else max_reads / n_reads * 10
-    print('Acceptance threshold: {:.2f}'.format(p_accept))
+    prob_accept = 1.0 if max_reads*10 >= n_reads else max_reads / n_reads * 10
+    print('Acceptance threshold: {:.2g}'.format(prob_accept))
 
     # set up random number generation
     if args.seed is None:
@@ -199,19 +214,16 @@ if __name__ == "__main__":
 
         cov_obs = []
 
-        # set up the generator over FastQ reads
-        fq_reader = next_read(readfq(open_input(args.FASTQ)), site, k_size)
+        # set up the generator over FastQ reads, with sub-sampling
+        fq_reader = next_read(args.FASTQ, site, k_size, prob_accept)
+
         while True:
             try:
                 seq, ix, _id, seq_len = next(fq_reader)
             except StopIteration:
                 progress.close()
-                print('Reached end of FastQ file')
+                print('End of FastQ file reached before filling requested quota')
                 break
-
-            # subsample over entire read set to fulfill quota
-            if unif() > p_accept:
-                continue
 
             # if the read contains no junction, we might still use it
             # as an example of a shotgun read (wgs)
@@ -253,7 +265,7 @@ if __name__ == "__main__":
                 continue
 
             # record this observation
-            cov_obs.append(CovInfo(mean_inner, mean_outer, rtype)) #, _id, ix))
+            cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
             progress.update()
 
             # if we have reached a requested number of observations
@@ -275,19 +287,28 @@ if __name__ == "__main__":
     n_sampled = len(df)
 
     df['ratio'] = df.mean_inner / df.mean_outer
-    df.sort_values('ratio', inplace=True)
 
     agg_type = df.groupby('read_type').size()
     print('Collected observation breakdown. WGS: {} Hi-C: {}'.format(agg_type.wgs, agg_type.hic))
 
     # the suspected non-hic observations
     wgs = df.loc[df.read_type == 'wgs'].copy()
+    # we require the table to be in ascending ratio order to assign p-values
+    wgs.sort_values('ratio', inplace=True)
     wgs.reset_index(inplace=True, drop=True)
     wgs['pvalue'] = 1.0 / len(wgs) * (wgs.index + 1)
 
     # the suspected hi-c observations
     hic = df.loc[df.read_type == 'hic'].copy()
     hic['pvalue'] = None
+
+    # compute the number of HiC reads exceeding a p-value threshold
+    wgs_pval_ratio = wgs.iloc[(wgs['pvalue'] < args.p_value).sum()].ratio
+    n_hic = (hic.ratio < wgs_pval_ratio).sum()
+
+    # report as a fraction of all n_reads
+    print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
+        args.p_value, n_hic, n_sampled, n_hic / n_sampled))
 
     # combine them together
     if args.output is not None:
@@ -297,10 +318,3 @@ if __name__ == "__main__":
         df.reset_index(inplace=True, drop=True)
         df.to_csv(gzip.open(args.output, 'wt'), sep='\t')
 
-    # compute the number of HiC reads exceeding a p-value threshold
-    wgs_pval_ratio = wgs.iloc[(wgs['pvalue'] < args.p_value).sum()].ratio
-    n_hic = (hic.ratio < wgs_pval_ratio).sum()
-
-    # report as a fraction of all n_reads
-    print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
-        args.p_value, n_hic, n_sampled, n_hic / n_sampled))
