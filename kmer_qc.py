@@ -160,6 +160,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser('Prototype kmer analyzer')
     parser.add_argument('-s', '--seed', type=int, help='Random seed used in sampling the read-set')
     parser.add_argument('--max-n', default=500000, type=int, help='Stop after collecting N samples')
+    parser.add_argument('-A', '--accept-all', default=False, action='store_true',
+                        help='Override acceptance rate and accept all useable reads')
     parser.add_argument('--max-coverage', default=500, type=int, help='Ignore regions with more than this coverage')
     parser.add_argument('--p-value', default=0.05, type=float, help='p-value threshold for Hi-C junctions')
     parser.add_argument('-o', '--output', help='Output the table of observations to a file')
@@ -197,8 +199,12 @@ if __name__ == "__main__":
     print('Found {} reads'.format(n_reads))
 
     # probability of acceptance for subsampling
-    prob_accept = 1.0 if max_reads*10 >= n_reads else max_reads / n_reads * 10
-    print('Acceptance threshold: {:.2g}'.format(prob_accept))
+    if args.accept_all is not None:
+        prob_accept = 1.0
+        print('Accepting all useable reads')
+    else:
+        prob_accept = 1.0 if max_reads*10 >= n_reads else max_reads / n_reads * 10
+        print('Acceptance threshold: {:.2g}'.format(prob_accept))
 
     # set up random number generation
     if args.seed is None:
@@ -281,15 +287,15 @@ if __name__ == "__main__":
     z_outer = df.mean_outer == 0
     nz_either = ~(z_inner | z_outer)
     df = df[nz_either]
-    print('Rows removed with coverage: inner {}, outer {}, shared {}'.format(
+    print('Rows removed with no coverage: inner {}, outer {}, shared {}'.format(
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
     n_sampled = len(df)
 
     df['ratio'] = df.mean_inner / df.mean_outer
 
-    agg_type = df.groupby('read_type').size()
-    print('Collected observation breakdown. WGS: {} Hi-C: {}'.format(agg_type.wgs, agg_type.hic))
+    agg_rtype = df.groupby('read_type').size()
+    print('Collected observation breakdown. WGS: {} Hi-C: {}'.format(agg_rtype.wgs, agg_rtype.hic))
 
     # the suspected non-hic observations
     wgs = df.loc[df.read_type == 'wgs'].copy()
@@ -302,9 +308,10 @@ if __name__ == "__main__":
     hic = df.loc[df.read_type == 'hic'].copy()
     hic['pvalue'] = None
 
-    # compute the number of HiC reads exceeding a p-value threshold
-    wgs_pval_ratio = wgs.iloc[(wgs['pvalue'] < args.p_value).sum()].ratio
-    n_hic = (hic.ratio < wgs_pval_ratio).sum()
+    # Using the wgs data, find the largest ratio value for the requested p-value
+    ratio_at_pval = wgs[wgs.pvalue < args.p_value].ratio.max()
+    # now count the number hic reads which ratios less than this value
+    n_hic = (hic.ratio < ratio_at_pval).sum()
 
     # report as a fraction of all n_reads
     print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
@@ -312,6 +319,8 @@ if __name__ == "__main__":
 
     # combine them together
     if args.output is not None:
+        if not args.output.endswith('.gz'):
+            args.output = '{}.gz'.format(args.output)
         print('Writing observations to gzipped csv file: {}'.format(args.output))
         df = wgs.append(hic)
         df.sort_values('ratio', inplace=True)
