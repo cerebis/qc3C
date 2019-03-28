@@ -163,7 +163,8 @@ if __name__ == "__main__":
     parser.add_argument('-A', '--accept-all', default=False, action='store_true',
                         help='Override acceptance rate and accept all useable reads')
     parser.add_argument('--max-coverage', default=500, type=int, help='Ignore regions with more than this coverage')
-    parser.add_argument('--mean-insert', type=int, help='Mean fragment length to use in estimating the unobserved junction rate')
+    parser.add_argument('--mean-insert', type=int,
+                        help='Mean fragment length to use in estimating the unobserved junction rate')
     parser.add_argument('-o', '--output', help='Output the table of observations to a file')
     parser.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
     parser.add_argument('SITE', help='Junction site')
@@ -171,7 +172,7 @@ if __name__ == "__main__":
     parser.add_argument('KMER_DB', help='Jellyfish kmer database')
     args = parser.parse_args()
 
-    max_reads = int(args.max_n)
+    max_reads = args.max_n
 
     # We will treat all sequence in upper case
     site = args.SITE.upper()
@@ -219,7 +220,7 @@ if __name__ == "__main__":
     reads_evaluated = 0
     starts_with_cutsite = 0
     read_length = 0
-    half_site = site[0:int(site_size/2)]
+    half_site = site[0:site_size//2]
     with tqdm.tqdm(total=max_reads) as progress:
 
         cov_obs = []
@@ -236,7 +237,7 @@ if __name__ == "__main__":
                 break
 
             reads_evaluated += 1
-            if seq[0:int(site_size/2)] == half_site:
+            if seq[0:site_size//2] == half_site:
                 starts_with_cutsite += 1
             read_length += len(seq)
 
@@ -320,7 +321,7 @@ if __name__ == "__main__":
     hic['pvalue'] = None
 
     print("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
-    print("Expected fraction at 50% GC: {:.3g}".format(1/np.power(4,site_size/2)))
+    print("Expected fraction at 50% GC: {:.3g}".format(1 / np.power(4, site_size / 2)))
     print("Fraction of reads containing the junction sequence: {:.3g}".format(len(hic) / reads_evaluated))
 
     df = wgs.append(hic)
@@ -341,11 +342,13 @@ if __name__ == "__main__":
     if args.mean_insert is not None:
         unobserved_fraction = (args.mean_insert - read_length * 2) / args.mean_insert
         fraction_hic += fraction_hic * unobserved_fraction
-    print("Estimated Hi-C read fraction via pvalue sum method: {:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
+    print("Estimated Hi-C read fraction via p-value sum method: {:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
     if args.mean_insert is None:
-        print("To adjust the estimate for unobserved sequence between paired-end reads, specify the average library fragment size with the --mean-insert= option")
+        print("To adjust the estimate for unobserved sequence between paired-end reads,\n"
+              "specify the average library fragment size with the --mean-insert= option")
     else:
-        print("The estimate above has been adjusted for unobserved junction sequences based on an average fragment length of {:.4g}nt".format(args.mean_insert))
+        print("The estimate above has been adjusted for unobserved junction sequences\n"
+              "based on an average fragment length of {:.4g}nt".format(args.mean_insert))
 
     # combine them together
     if args.output is not None:
