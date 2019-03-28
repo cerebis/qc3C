@@ -317,6 +317,21 @@ if __name__ == "__main__":
     print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
         args.p_value, n_hic, n_sampled, n_hic / n_sampled))
 
+    df = wgs.append(hic)
+    df.sort_values('ratio', inplace=True)
+    df.reset_index(inplace=True, drop=True)
+    cur_pval = 0
+    sum_pvals = 0
+    for row in df[['pvalue', 'read_type']].itertuples():
+        if row.pvalue is not None:
+            cur_pval = row.pvalue
+        if cur_pval >= args.p_value:
+            break
+        if row.read_type == 'hic':
+            sum_pvals += 1 - cur_pval
+    print("pval sum: {:.4g} ".format(sum_pvals))
+    print("Estimated fraction pval sum method: {:.4g}".format(sum_pvals / n_sampled))
+
     # combine them together
     if args.output is not None:
         if not args.output.endswith('.gz'):
