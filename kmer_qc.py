@@ -163,7 +163,7 @@ if __name__ == "__main__":
     parser.add_argument('-A', '--accept-all', default=False, action='store_true',
                         help='Override acceptance rate and accept all useable reads')
     parser.add_argument('--max-coverage', default=500, type=int, help='Ignore regions with more than this coverage')
-    parser.add_argument('--p-value', default=0.05, type=float, help='p-value threshold for Hi-C junctions')
+    parser.add_argument('--mean-insert', type=int, help='Mean fragment length to use in estimating the unobserved junction rate')
     parser.add_argument('-o', '--output', help='Output the table of observations to a file')
     parser.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
     parser.add_argument('SITE', help='Junction site')
@@ -217,6 +217,9 @@ if __name__ == "__main__":
     randint = random_state.randint
 
     reads_evaluated = 0
+    starts_with_cutsite = 0
+    read_length = 0
+    half_site = site[0:int(site_size/2)]
     with tqdm.tqdm(total=max_reads) as progress:
 
         cov_obs = []
@@ -233,6 +236,10 @@ if __name__ == "__main__":
                 break
 
             reads_evaluated += 1
+            if seq[0:int(site_size/2)] == half_site:
+                starts_with_cutsite += 1
+            read_length += len(seq)
+
             # if the read contains no junction, we might still use it
             # as an example of a shotgun read (wgs)
             if ix is None:
@@ -262,6 +269,7 @@ if __name__ == "__main__":
 
                 # abandon this sequence if it contains an N
                 if 'N' in seq[ix - k_size: ix + k_size + site_size]:
+                    read_length -= len(seq)
                     reads_evaluated -= 1
                     continue
 
@@ -298,7 +306,7 @@ if __name__ == "__main__":
     df['ratio'] = df.mean_inner / df.mean_outer
 
     agg_rtype = df.groupby('read_type').size()
-    print('Collected observation breakdown. WGS: {} Hi-C: {}'.format(agg_rtype.wgs, agg_rtype.hic))
+    print('Collected observation breakdown. WGS: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
 
     # the suspected non-hic observations
     wgs = df.loc[df.read_type == 'wgs'].copy()
@@ -311,14 +319,9 @@ if __name__ == "__main__":
     hic = df.loc[df.read_type == 'hic'].copy()
     hic['pvalue'] = None
 
-    # Using the wgs data, find the largest ratio value for the requested p-value
-    ratio_at_pval = wgs[wgs.pvalue < args.p_value].ratio.max()
-    # now count the number hic reads which ratios less than this value
-    n_hic = (hic.ratio < ratio_at_pval).sum()
-
-    # report as a fraction of all n_reads
-    print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
-        args.p_value, n_hic, reads_evaluated, n_hic / reads_evaluated))
+    print("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
+    print("Expected fraction at 50% GC: {:.3g}".format(1/np.power(4,site_size/2)))
+    print("Fraction of reads containing the junction sequence: {:.3g}".format(len(hic) / reads_evaluated))
 
     df = wgs.append(hic)
     df.sort_values('ratio', inplace=True)
@@ -329,13 +332,20 @@ if __name__ == "__main__":
     for row in df[['pvalue', 'read_type']].itertuples():
         if row.pvalue is not None:
             cur_pval = row.pvalue
-        if cur_pval >= args.p_value:
-            break
         if row.read_type == 'hic':
             sum_pvals += 1 - cur_pval
             var_pvals += cur_pval * (1 - cur_pval)
-    print("pval sum: {:.4g} +/- {:.4g}".format(sum_pvals, np.sqrt(var_pvals)))
-    print("Estimated fraction pval sum method: {:.4g} +/- {:.4g}".format(sum_pvals / reads_evaluated, np.sqrt(var_pvals) / reads_evaluated))
+    fraction_hic = sum_pvals / reads_evaluated
+    hic_stddev = np.sqrt(var_pvals) / reads_evaluated
+    read_length /= reads_evaluated
+    if args.mean_insert is not None:
+        unobserved_fraction = (args.mean_insert - read_length * 2) / args.mean_insert
+        fraction_hic += fraction_hic * unobserved_fraction
+    print("Estimated Hi-C read fraction via pvalue sum method: {:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
+    if args.mean_insert is None:
+        print("To adjust the estimate for unobserved sequence between paired-end reads, specify the average library fragment size with the --mean-insert= option")
+    else:
+        print("The estimate above has been adjusted for unobserved junction sequences based on an average fragment length of {:.4g}nt".format(args.mean_insert))
 
     # combine them together
     if args.output is not None:
