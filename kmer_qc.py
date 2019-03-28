@@ -216,6 +216,7 @@ if __name__ == "__main__":
     unif = random_state.uniform
     randint = random_state.randint
 
+    reads_evaluated = 0
     with tqdm.tqdm(total=max_reads) as progress:
 
         cov_obs = []
@@ -231,6 +232,7 @@ if __name__ == "__main__":
                 print('End of FastQ file reached before filling requested quota')
                 break
 
+            reads_evaluated += 1
             # if the read contains no junction, we might still use it
             # as an example of a shotgun read (wgs)
             if ix is None:
@@ -260,6 +262,7 @@ if __name__ == "__main__":
 
                 # abandon this sequence if it contains an N
                 if 'N' in seq[ix - k_size: ix + k_size + site_size]:
+                    reads_evaluated -= 1
                     continue
 
                 rtype = 'hic'
@@ -315,13 +318,14 @@ if __name__ == "__main__":
 
     # report as a fraction of all n_reads
     print("For p-value {:.3g}, {} reads from {} are Hi-C. Estimated fraction: {:4g}".format(
-        args.p_value, n_hic, n_sampled, n_hic / n_sampled))
+        args.p_value, n_hic, reads_evaluated, n_hic / reads_evaluated))
 
     df = wgs.append(hic)
     df.sort_values('ratio', inplace=True)
     df.reset_index(inplace=True, drop=True)
     cur_pval = 0
     sum_pvals = 0
+    var_pvals = 0
     for row in df[['pvalue', 'read_type']].itertuples():
         if row.pvalue is not None:
             cur_pval = row.pvalue
@@ -329,8 +333,9 @@ if __name__ == "__main__":
             break
         if row.read_type == 'hic':
             sum_pvals += 1 - cur_pval
-    print("pval sum: {:.4g} ".format(sum_pvals))
-    print("Estimated fraction pval sum method: {:.4g}".format(sum_pvals / n_sampled))
+            var_pvals += cur_pval * (1 - cur_pval)
+    print("pval sum: {:.4g} +/- {:.4g}".format(sum_pvals, np.sqrt(var_pvals)))
+    print("Estimated fraction pval sum method: {:.4g} +/- {:.4g}".format(sum_pvals / reads_evaluated, np.sqrt(var_pvals) / reads_evaluated))
 
     # combine them together
     if args.output is not None:
@@ -341,4 +346,3 @@ if __name__ == "__main__":
         df.sort_values('ratio', inplace=True)
         df.reset_index(inplace=True, drop=True)
         df.to_csv(gzip.open(args.output, 'wt'), sep='\t')
-
