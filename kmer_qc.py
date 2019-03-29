@@ -362,7 +362,7 @@ if __name__ == "__main__":
     sum_pvals = 0
     var_pvals = 0
     for row in df[['pvalue', 'read_type']].itertuples():
-        if row.pvalue is not None:
+        if pandas.notnull(row.pvalue):
             cur_pval = row.pvalue
         if row.read_type == 'hic':
             sum_pvals += 1 - cur_pval
