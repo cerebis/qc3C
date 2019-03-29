@@ -100,7 +100,7 @@ def readfq(fp):
                 break
 
 
-def next_read(filename, site, k_size, prob_accept):
+def next_read(filename, site, k_size, prob_accept, progress):
     """
     Create a generator function which returns sequence data site positions
     from a FastQ file.
@@ -108,12 +108,14 @@ def next_read(filename, site, k_size, prob_accept):
     :param site: the target site to find in reads, eg GATCGATC
     :param k_size: the k-mer size used in the counting database
     :param prob_accept: probability threshold used to subsample the full read-set
+    :param progress: progress bar for user feedback
     :return: yield tuple of (sequence, site_position, read_id, sequence length)
     """
     reader = readfq(open_input(filename))
     site_size = len(site)
 
     for _id, _seq, _qual in reader:
+        progress.update()
         seq_len = len(_seq)
         # skip sequences which are too short to analyze
         if seq_len < 2 * k_size + site_size + 1:
@@ -158,6 +160,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser('Prototype kmer analyzer')
+    parser.add_argument('--pool-size', type=int,
+                        help='The total number of reads which are being provided for consideration')
     parser.add_argument('-s', '--seed', type=int, help='Random seed used in sampling the read-set')
     parser.add_argument('--max-n', default=500000, type=int, help='Stop after collecting N samples')
     parser.add_argument('-A', '--accept-all', default=False, action='store_true',
@@ -195,9 +199,13 @@ if __name__ == "__main__":
                         [True] * (flank_size+2), dtype=np.bool)
     INNER_IX = ~ OUTER_IX
 
-    print('Counting FastQ reads...')
-    n_reads = count_fastq_sequences(args.FASTQ)
-    print('Found {} reads'.format(n_reads))
+    # either count the reads or use the information provided by the user.
+    if args.pool_size is None:
+        print('No pool size provided, counting FastQ reads...')
+        n_reads = count_fastq_sequences(args.FASTQ)
+        print('Found {} reads in {}'.format(n_reads, args.FASTQ))
+    else:
+        n_reads = args.pool_size
 
     # probability of acceptance for subsampling
     if args.accept_all is not None:
@@ -221,18 +229,27 @@ if __name__ == "__main__":
     starts_with_cutsite = 0
     read_length = 0
     half_site = site[0:site_size//2]
-    with tqdm.tqdm(total=max_reads) as progress:
+
+    with tqdm.tqdm(desc="Pool  ", total=n_reads, ncols=80) as pb_read_pool, \
+            tqdm.tqdm(desc="Sample", total=max_reads, ncols=80) as pb_sample:
 
         cov_obs = []
 
         # set up the generator over FastQ reads, with sub-sampling
-        fq_reader = next_read(args.FASTQ, site, k_size, prob_accept)
+        fq_reader = next_read(args.FASTQ, site, k_size, prob_accept, pb_read_pool)
 
         while True:
+
+            # TODO we could probably take this try/catch outside the look
+            # TODO as we've more than one place where breaks can occur.
             try:
                 seq, ix, _id, seq_len = next(fq_reader)
             except StopIteration:
-                progress.close()
+                # we need to manually close these progress bars if we don't want
+                # nearby print statements to interfere
+                # TODO doing this makes the with() statement sorta useless
+                pb_read_pool.close()
+                pb_sample.close()
                 print('End of FastQ file reached before filling requested quota')
                 break
 
@@ -284,15 +301,17 @@ if __name__ == "__main__":
 
             # record this observation
             cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
-            progress.update()
+            pb_sample.update()
 
             # if we have reached a requested number of observations
             # then stop processing
             if args.max_n is not None and len(cov_obs) == args.max_n:
                 break
 
-    # lets do some tabular munging
+    # lets do some tabular munging, making sure that our categories are explicit
     df = pandas.DataFrame(cov_obs)
+    # make read_type categorical so we will always see values for both when counting
+    df.read_type = pandas.Categorical(df.read_type, ['hic', 'wgs'], ordered=False)
 
     # remove any row which had zero coverage in inner or outer region
     z_inner = df.mean_inner == 0
@@ -303,11 +322,23 @@ if __name__ == "__main__":
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
     n_sampled = len(df)
+    if n_sampled == 0:
+        raise RuntimeError('The sample set was empty. '
+                           'Please check that the kmer database and fastq file are a correct match and '
+                           'that --max-n is not set too small')
 
     df['ratio'] = df.mean_inner / df.mean_outer
 
     agg_rtype = df.groupby('read_type').size()
     print('Collected observation breakdown. WGS: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
+    if agg_rtype.wgs == 0:
+        raise RuntimeError('No wgs examples were contained in the collected sample. '
+                           'Consider increasing --max-n')
+    if agg_rtype.hic == 0:
+        raise RuntimeError('No junction examples were contained in the collected sample. '
+                           'Consider increasing --max-n')
+
+
 
     # the suspected non-hic observations
     wgs = df.loc[df.read_type == 'wgs'].copy()
