@@ -7,7 +7,7 @@ import gzip
 import logging
 
 from collections import namedtuple
-from qc3C.ligation import ligation_junction_seq
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 
 try:
     import dna_jellyfish

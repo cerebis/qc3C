@@ -11,7 +11,7 @@ import logging
 from recordclass import recordclass
 from collections import namedtuple
 from collections.abc import Collection
-from qc3C.ligation import ligation_junction_seq
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 
 logger = logging.getLogger(__name__)
 
