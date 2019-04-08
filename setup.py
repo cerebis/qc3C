@@ -5,7 +5,7 @@ with open('README.md', 'r') as fh:
 
 setuptools.setup(
     name='qc3C',
-    description='Analyze Hi-C BAM files for indications of proximity ligation signal',
+    description='Hi-C quality control analysis',
     long_description=long_description,
     version='0.1',
     author='Matthew Z DeMaere',
@@ -16,11 +16,13 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
 
     install_requires=[
+        'numpy',
         'pandas',
         'pysam',
         'tqdm',
         'biopython',
         'recordclass',
+        'dna-jellyfish'
     ],
 
     classifiers=[

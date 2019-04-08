@@ -1,5 +1,7 @@
+numpy
 pandas
 pysam
 tqdm
 biopython
 recordclass
+jellyfish

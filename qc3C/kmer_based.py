@@ -1,42 +1,23 @@
-#!/usr/bin/env python3
 import numpy as np
 import tqdm
 import pandas
 import subprocess
 import bz2
 import gzip
+import logging
+
 from collections import namedtuple
+from qc3C.ligation import ligation_junction_seq
 
 try:
     import dna_jellyfish
 except ImportError:
     import jellyfish as dna_jellyfish
 
+logger = logging.getLogger(__name__)
+
+
 CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type'])
-
-
-def collect_coverage(seq, ix, site_size, k):
-    """
-    Collect the k-mer coverage centered around the position ix. From the left, the sliding
-    window begins just before the site region and slides right until just after. Means
-    are then calculated for the inner (within the junction) and outer (left and right flanks)
-    :param seq: the sequence to analyze
-    :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
-    :param site_size: the size of the junction site
-    :param k: the kmer size
-    :return: mean(inner), mean(outer)
-    """
-    assert k <= ix <= len(seq) - (k + site_size), \
-        'The site index {} is either too close to start (min {}) or ' \
-        'end (max {}) of read to scan for coverage'.format(ix, k, len(seq) - (k + site_size))
-
-    sliding_cov = np.zeros(shape=k+site_size+1, dtype=np.int)
-    for i in range(-k, site_size+1):
-        smer = seq[ix+i:ix+i+k]
-        mer = dna_jellyfish.MerDNA(smer)
-        mer.canonicalize()
-        sliding_cov[i] = query_jf[mer]
-    return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
 
 def open_input(file_name):
@@ -100,40 +81,6 @@ def readfq(fp):
                 break
 
 
-def next_read(filename, site, k_size, prob_accept, progress):
-    """
-    Create a generator function which returns sequence data site positions
-    from a FastQ file.
-    :param filename: the fastq file, compressed or not
-    :param site: the target site to find in reads, eg GATCGATC
-    :param k_size: the k-mer size used in the counting database
-    :param prob_accept: probability threshold used to subsample the full read-set
-    :param progress: progress bar for user feedback
-    :return: yield tuple of (sequence, site_position, read_id, sequence length)
-    """
-    reader = readfq(open_input(filename))
-    site_size = len(site)
-
-    for _id, _seq, _qual in reader:
-        progress.update()
-        seq_len = len(_seq)
-        # skip sequences which are too short to analyze
-        if seq_len < 2 * k_size + site_size + 1:
-            continue
-        # subsampling read-set
-        if unif() > prob_accept:
-            continue
-        # search for the site
-        _seq = _seq.upper()
-        _ix = _seq.find(site)
-        # no site found
-        if _ix == -1:
-            yield _seq, None, _id, seq_len
-        # only report sites which meet flank constraints
-        elif k_size <= _ix <= (seq_len - (k_size + site_size)):
-            yield _seq, _ix, _id, seq_len
-
-
 def count_fastq_sequences(file_name):
     """
     Estimate the number of fasta sequences in a file by counting headers. Decompression
@@ -156,33 +103,108 @@ def count_fastq_sequences(file_name):
     return n
 
 
-if __name__ == "__main__":
-    import argparse
+def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated, starts_with_cutsite):
 
-    parser = argparse.ArgumentParser('Prototype kmer analyzer')
-    parser.add_argument('--pool-size', type=int,
-                        help='The total number of reads which are being provided for consideration')
-    parser.add_argument('-s', '--seed', type=int, help='Random seed used in sampling the read-set')
-    parser.add_argument('--max-n', default=500000, type=int, help='Stop after collecting N samples')
-    parser.add_argument('-A', '--accept-all', default=False, action='store_true',
-                        help='Override acceptance rate and accept all useable reads')
-    parser.add_argument('--max-coverage', default=500, type=int, help='Ignore regions with more than this coverage')
-    parser.add_argument('--mean-insert', type=int,
-                        help='Mean fragment length to use in estimating the unobserved junction rate')
-    parser.add_argument('-o', '--output', help='Output the table of observations to a file')
-    parser.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
-    parser.add_argument('SITE', help='Junction site')
-    parser.add_argument('FASTQ', help='FastQ file used in making the kmer database')
-    parser.add_argument('KMER_DB', help='Jellyfish kmer database')
-    args = parser.parse_args()
+    logger.info("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
+    logger.info("Expected fraction at 50% GC: {:.3g}".format(1 / np.power(4, site_size / 2)))
+    logger.info("Fraction of reads containing the junction sequence: {:.3g}".format(len(hic) / reads_evaluated))
 
-    max_reads = args.max_n
+    cur_pval = 0
+    sum_pvals = 0
+    var_pvals = 0
+    for row in all[['pvalue', 'read_type']].itertuples():
+        if pandas.notnull(row.pvalue):
+            cur_pval = row.pvalue
+        if row.read_type == 'hic':
+            sum_pvals += 1 - cur_pval
+            var_pvals += cur_pval * (1 - cur_pval)
 
-    # We will treat all sequence in upper case
-    site = args.SITE.upper()
-    site_size = len(site)
+    fraction_hic = sum_pvals / reads_evaluated
+    hic_stddev = np.sqrt(var_pvals) / reads_evaluated
+    if mean_insert is not None:
+        unobserved_fraction = (mean_insert - (read_length / reads_evaluated) * 2) / mean_insert
+        fraction_hic += fraction_hic * unobserved_fraction
 
-    k_size = args.KMER_SIZE
+    logger.info("Estimated Hi-C read fraction via p-value sum method: "
+                "{:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
+
+    if mean_insert is None:
+        logger.info("To adjust the estimate for unobserved sequence between paired-end reads,\n"
+                    "specify the average library fragment size with the --mean-insert= option")
+    else:
+        logger.info("The estimate above has been adjusted for unobserved junction sequences\n"
+                    "based on an average fragment length of {:.4g}nt".format(mean_insert))
+
+
+def analyze(k_size, enzymes, kmer_db, fastq, mean_insert, output=None, seed=None, pool_size=None,
+            max_reads=None, accept_all=False, max_coverage=500):
+
+    def collect_coverage(seq, ix, site_size, k, min_cov=0):
+        """
+        Collect the k-mer coverage centered around the position ix. From the left, the sliding
+        window begins just before the site region and slides right until just after. Means
+        are then calculated for the inner (within the junction) and outer (left and right flanks)
+        :param seq: the sequence to analyze
+        :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
+        :param site_size: the size of the junction site
+        :param k: the kmer size
+        :param min_cov: apply a minimum value to coverage reported by jellyfish.
+        :return: mean(inner), mean(outer)
+        """
+        assert k <= ix <= len(seq) - (k + site_size), \
+            'The site index {} is either too close to start (min {}) or ' \
+            'end (max {}) of read to scan for coverage'.format(ix, k, len(seq) - (k + site_size))
+
+        sliding_cov = np.zeros(shape=k+site_size+1, dtype=np.int)
+        for i in range(-k, site_size+1):
+            smer = seq[ix+i:ix+i+k]
+            mer = dna_jellyfish.MerDNA(smer)
+            mer.canonicalize()
+            k_cov = query_jf[mer]
+            if i == 0 and k_cov < 1:
+                k_cov = 1
+            sliding_cov[i] = k_cov
+        return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
+
+    def next_read(filename, site, k_size, prob_accept, progress):
+        """
+        Create a generator function which returns sequence data site positions
+        from a FastQ file.
+        :param filename: the fastq file, compressed or not
+        :param site: the target site to find in reads, eg GATCGATC
+        :param k_size: the k-mer size used in the counting database
+        :param prob_accept: probability threshold used to subsample the full read-set
+        :param progress: progress bar for user feedback
+        :return: yield tuple of (sequence, site_position, read_id, sequence length)
+        """
+        reader = readfq(open_input(filename))
+        site_size = len(site)
+
+        for _id, _seq, _qual in reader:
+            progress.update()
+            seq_len = len(_seq)
+            # skip sequences which are too short to analyze
+            if seq_len < 2 * k_size + site_size + 1:
+                continue
+            # subsampling read-set
+            if unif() > prob_accept:
+                continue
+            # search for the site
+            _seq = _seq.upper()
+            _ix = _seq.find(site)
+            # no site found
+            if _ix == -1:
+                yield _seq, None, _id, seq_len
+            # only report sites which meet flank constraints
+            elif k_size <= _ix <= (seq_len - (k_size + site_size)):
+                yield _seq, _ix, _id, seq_len
+
+    # Determine the junction, treat as uppercase
+    assert len(enzymes) == 1, 'Kmer-based approach currently supports only a single enzyme'
+    junction = ligation_junction_seq(get_enzyme_instance(enzymes[0]))
+    site = junction.junction.upper()
+    site_size = junction.junc_len
+
     # TODO for flexible flanks could be handled if L/R flanks treated independently
     flank_size = (k_size - site_size) // 2
 
@@ -192,7 +214,7 @@ if __name__ == "__main__":
 
     # initialize jellyfish API
     dna_jellyfish.MerDNA_k(k_size)
-    query_jf = dna_jellyfish.QueryMerFile(args.KMER_DB)
+    query_jf = dna_jellyfish.QueryMerFile(kmer_db)
 
     OUTER_IX = np.array([True] * (flank_size+2) +
                         [False] * (site_size*2 + 1 - 4) +
@@ -200,28 +222,28 @@ if __name__ == "__main__":
     INNER_IX = ~ OUTER_IX
 
     # either count the reads or use the information provided by the user.
-    if args.pool_size is None:
-        print('No pool size provided, counting FastQ reads...')
-        n_reads = count_fastq_sequences(args.FASTQ)
-        print('Found {} reads in {}'.format(n_reads, args.FASTQ))
+    if pool_size is None:
+        logger.info('No pool size provided, counting FastQ reads...')
+        n_reads = count_fastq_sequences(fastq)
+        logger.info('Found {} reads in {}'.format(n_reads, fastq))
     else:
-        n_reads = args.pool_size
+        n_reads = pool_size
 
     # probability of acceptance for subsampling
-    if args.accept_all is not None:
+    if accept_all:
         prob_accept = 1.0
-        print('Accepting all useable reads')
+        logger.info('Accepting all useable reads')
     else:
         prob_accept = 1.0 if max_reads*10 >= n_reads else max_reads / n_reads * 10
-        print('Acceptance threshold: {:.2g}'.format(prob_accept))
+        logger.info('Acceptance threshold: {:.2g}'.format(prob_accept))
 
     # set up random number generation
-    if args.seed is None:
-        args.seed = np.random.randint(1000000, 99999999)
-        print('Random seed was not set, using {}'.format(args.seed))
+    if seed is None:
+        seed = np.random.randint(1000000, 99999999)
+        logger.info('Random seed was not set, using {}'.format(seed))
     else:
-        print('Random seed was {}'.format(args.seed))
-    random_state = np.random.RandomState(args.seed)
+        logger.info('Random seed was {}'.format(seed))
+    random_state = np.random.RandomState(seed)
     unif = random_state.uniform
     randint = random_state.randint
 
@@ -236,7 +258,7 @@ if __name__ == "__main__":
         cov_obs = []
 
         # set up the generator over FastQ reads, with sub-sampling
-        fq_reader = next_read(args.FASTQ, site, k_size, prob_accept, pb_read_pool)
+        fq_reader = next_read(fastq, site, k_size, prob_accept, pb_read_pool)
 
         while True:
 
@@ -250,7 +272,7 @@ if __name__ == "__main__":
                 # TODO doing this makes the with() statement sorta useless
                 pb_read_pool.close()
                 pb_sample.close()
-                print('End of FastQ file reached before filling requested quota')
+                logger.info('End of FastQ file reached before filling requested quota')
                 break
 
             reads_evaluated += 1
@@ -293,10 +315,10 @@ if __name__ == "__main__":
 
                 rtype = 'hic'
 
-            mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size)
+            mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size, min_cov=1)
 
             # avoid regions with pathologically high coverage
-            if mean_outer > args.max_coverage:
+            if mean_outer > max_coverage:
                 continue
 
             # record this observation
@@ -305,32 +327,32 @@ if __name__ == "__main__":
 
             # if we have reached a requested number of observations
             # then stop processing
-            if args.max_n is not None and len(cov_obs) == args.max_n:
+            if max_reads is not None and len(cov_obs) == max_reads:
                 break
 
     # lets do some tabular munging, making sure that our categories are explicit
-    df = pandas.DataFrame(cov_obs)
+    all_df = pandas.DataFrame(cov_obs)
     # make read_type categorical so we will always see values for both when counting
-    df.read_type = pandas.Categorical(df.read_type, ['hic', 'wgs'], ordered=False)
+    all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
 
     # remove any row which had zero coverage in inner or outer region
-    z_inner = df.mean_inner == 0
-    z_outer = df.mean_outer == 0
+    z_inner = all_df.mean_inner == 0
+    z_outer = all_df.mean_outer == 0
     nz_either = ~(z_inner | z_outer)
-    df = df[nz_either]
-    print('Rows removed with no coverage: inner {}, outer {}, shared {}'.format(
+    all_df = all_df[nz_either]
+    logger.info('Rows removed with no coverage: inner {}, outer {}, shared {}'.format(
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-    n_sampled = len(df)
+    n_sampled = len(all_df)
     if n_sampled == 0:
         raise RuntimeError('The sample set was empty. '
                            'Please check that the kmer database and fastq file are a correct match and '
                            'that --max-n is not set too small')
 
-    df['ratio'] = df.mean_inner / df.mean_outer
+    all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
 
-    agg_rtype = df.groupby('read_type').size()
-    print('Collected observation breakdown. WGS: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
+    agg_rtype = all_df.groupby('read_type').size()
+    logger.info('Collected observation breakdown. WGS: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
     if agg_rtype.wgs == 0:
         raise RuntimeError('No wgs examples were contained in the collected sample. '
                            'Consider increasing --max-n')
@@ -338,55 +360,29 @@ if __name__ == "__main__":
         raise RuntimeError('No junction examples were contained in the collected sample. '
                            'Consider increasing --max-n')
 
-
-
     # the suspected non-hic observations
-    wgs = df.loc[df.read_type == 'wgs'].copy()
+    wgs_df = all_df.loc[all_df.read_type == 'wgs'].copy()
     # we require the table to be in ascending ratio order to assign p-values
-    wgs.sort_values('ratio', inplace=True)
-    wgs.reset_index(inplace=True, drop=True)
-    wgs['pvalue'] = 1.0 / len(wgs) * (wgs.index + 1)
+    wgs_df.sort_values('ratio', inplace=True)
+    wgs_df.reset_index(inplace=True, drop=True)
+    wgs_df['pvalue'] = 1.0 / len(wgs_df) * (wgs_df.index + 1)
 
     # the suspected hi-c observations
-    hic = df.loc[df.read_type == 'hic'].copy()
-    hic['pvalue'] = None
+    hic_df = all_df.loc[all_df.read_type == 'hic'].copy()
+    hic_df['pvalue'] = None
 
-    print("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
-    print("Expected fraction at 50% GC: {:.3g}".format(1 / np.power(4, site_size / 2)))
-    print("Fraction of reads containing the junction sequence: {:.3g}".format(len(hic) / reads_evaluated))
+    all_df = wgs_df.append(hic_df)
+    all_df.sort_values('ratio', inplace=True)
+    all_df.reset_index(inplace=True, drop=True)
 
-    df = wgs.append(hic)
-    df.sort_values('ratio', inplace=True)
-    df.reset_index(inplace=True, drop=True)
-    cur_pval = 0
-    sum_pvals = 0
-    var_pvals = 0
-    for row in df[['pvalue', 'read_type']].itertuples():
-        if pandas.notnull(row.pvalue):
-            cur_pval = row.pvalue
-        if row.read_type == 'hic':
-            sum_pvals += 1 - cur_pval
-            var_pvals += cur_pval * (1 - cur_pval)
-    fraction_hic = sum_pvals / reads_evaluated
-    hic_stddev = np.sqrt(var_pvals) / reads_evaluated
-    read_length /= reads_evaluated
-    if args.mean_insert is not None:
-        unobserved_fraction = (args.mean_insert - read_length * 2) / args.mean_insert
-        fraction_hic += fraction_hic * unobserved_fraction
-    print("Estimated Hi-C read fraction via p-value sum method: {:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
-    if args.mean_insert is None:
-        print("To adjust the estimate for unobserved sequence between paired-end reads,\n"
-              "specify the average library fragment size with the --mean-insert= option")
-    else:
-        print("The estimate above has been adjusted for unobserved junction sequences\n"
-              "based on an average fragment length of {:.4g}nt".format(args.mean_insert))
+    print_report(hic_df, all_df, site_size, mean_insert, read_length, reads_evaluated, starts_with_cutsite)
 
     # combine them together
-    if args.output is not None:
-        if not args.output.endswith('.gz'):
-            args.output = '{}.gz'.format(args.output)
-        print('Writing observations to gzipped csv file: {}'.format(args.output))
-        df = wgs.append(hic)
-        df.sort_values('ratio', inplace=True)
-        df.reset_index(inplace=True, drop=True)
-        df.to_csv(gzip.open(args.output, 'wt'), sep='\t')
+    if output is not None:
+        if not output.endswith('.gz'):
+            output = '{}.gz'.format(output)
+        logger.info('Writing observations to gzipped csv file: {}'.format(output))
+        all_df = wgs_df.append(hic_df)
+        all_df.sort_values('ratio', inplace=True)
+        all_df.reset_index(inplace=True, drop=True)
+        all_df.to_csv(gzip.open(output, 'wt'), sep='\t')
