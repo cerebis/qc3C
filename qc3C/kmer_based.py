@@ -161,8 +161,8 @@ def analyze(k_size, enzymes, kmer_db, fastq, mean_insert, output=None, seed=None
             mer = dna_jellyfish.MerDNA(smer)
             mer.canonicalize()
             k_cov = query_jf[mer]
-            if i == 0 and k_cov < 1:
-                k_cov = 1
+            if k_cov < min_cov:
+                k_cov = min_cov
             sliding_cov[i] = k_cov
         return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
