@@ -22,7 +22,6 @@ setuptools.setup(
         'tqdm',
         'biopython',
         'recordclass',
-        'dna-jellyfish'
     ],
 
     classifiers=[

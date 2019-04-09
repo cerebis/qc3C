@@ -4,4 +4,3 @@ pysam
 tqdm
 biopython
 recordclass
-jellyfish
