@@ -104,6 +104,17 @@ def count_fastq_sequences(file_name):
 
 
 def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated, starts_with_cutsite):
+    """
+    Print a report of analysis results.
+
+    :param hic: the table of hi-c observations
+    :param all:  the table of all (wgs + hi-c) observations
+    :param site_size: the length of the junction in bp
+    :param mean_insert: the mean insert size used in library generation
+    :param read_length: the length of sequencing reads in bp
+    :param reads_evaluated: the number of reads evaluated in the analysis
+    :param starts_with_cutsite: the number of reads which began with a cut-site
+    """
 
     logger.info("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
     logger.info("Expected fraction at 50% GC: {:.3g}".format(1 / np.power(4, site_size / 2)))
@@ -136,8 +147,24 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
                     "based on an average fragment length of {:.4g}nt".format(mean_insert))
 
 
-def analyze(k_size, enzymes, kmer_db, fastq, mean_insert, output=None, seed=None, pool_size=None,
+def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None, pool_size=None,
             max_reads=None, accept_all=False, max_coverage=500):
+    """
+    Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
+    of proximity junctions.
+        
+    :param k_size: kmer size used when building the kmer database 
+    :param enzyme: the enzyme used during digestion 
+    :param kmer_db: the jellyfish kmer database
+    :param fastq: the reads as FastQ format.
+    :param mean_insert: mean length of inserts used in creating the library
+    :param output: write collected junction observations to file
+    :param seed: random seed used in subsampling read-set
+    :param pool_size: the total number of reads -- allows skipping counting them
+    :param max_reads: the number of examples to collect before stopping, if none process entire read-set
+    :param accept_all: simply accept every occcurence encountered
+    :param max_coverage: ignore kmers with coverage greater than this value
+    """
 
     def collect_coverage(seq, ix, site_size, k, min_cov=0):
         """
@@ -200,8 +227,7 @@ def analyze(k_size, enzymes, kmer_db, fastq, mean_insert, output=None, seed=None
                 yield _seq, _ix, _id, seq_len
 
     # Determine the junction, treat as uppercase
-    assert len(enzymes) == 1, 'Kmer-based approach currently supports only a single enzyme'
-    junction = ligation_junction_seq(get_enzyme_instance(enzymes[0]))
+    junction = ligation_junction_seq(get_enzyme_instance(enzyme))
     site = junction.junction.upper()
     site_size = junction.junc_len
 

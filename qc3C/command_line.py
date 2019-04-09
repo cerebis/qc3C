@@ -97,7 +97,8 @@ def main():
 
         # Kmer based analysis
         elif args.command == 'kmer':
-            kmer.analyze(args.KMER_SIZE, args.enzyme, args.KMER_DB, args.FASTQ, args.mean_insert,
+            assert len(args.enzyme) == 1, 'Kmer-based approach currently supports only a single enzyme'
+            kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
                          pool_size=args.pool_size, max_reads=args.max_reads, seed=args.seed,
                          max_coverage=args.max_coverage, accept_all=args.accept_all)
 
