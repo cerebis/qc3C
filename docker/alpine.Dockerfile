@@ -45,12 +45,11 @@ COPY ./root/ /
 
 ENV HOME=/opt/app-root/ \
     PATH=/opt/app-root/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-#
-#RUN mkdir -p ${HOME}
-#
-#WORKDIR ${HOME}
-#
-## Set the default CMD to print the usage of the language image
-#ENTRYPOINT ["/usr/bin/container-entrypoint"]
+
+RUN mkdir -p ${HOME}
+
+WORKDIR ${HOME}
+
+# Set the default CMD to print the usage of the language image
+ENTRYPOINT ["/usr/bin/container-entrypoint"]
 CMD ["usage"]
-#CMD ["/bin/ash"]
