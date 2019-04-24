@@ -1,6 +1,6 @@
 import logging
 import qc3C.bam_based as bam
-import qc3C.kmer_based as kmer
+# import qc3C.kmer_based as kmer
 
 __version__ = '0.1'
 __log_name__ = 'qc3C.log'
@@ -33,6 +33,8 @@ def main():
     CLI for BAM based analysis
     """
     cmd_bam.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
+    cmd_bam.add_argument('-m', '--mean-insert', type=int, required=True,
+                          help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_bam.add_argument('BAM', help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
@@ -93,14 +95,14 @@ def main():
 
         # BAM based analysis
         if args.command == 'bam':
-            bam.analyze(args.BAM, args.enzyme, threads=args.threads, sep=args.sep)
+            bam.analyze(args.BAM, args.enzyme, args.mean_insert, threads=args.threads, sep=args.sep)
 
         # Kmer based analysis
         elif args.command == 'kmer':
             assert len(args.enzyme) == 1, 'Kmer-based approach currently supports only a single enzyme'
-            kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
-                         pool_size=args.pool_size, max_reads=args.max_reads, seed=args.seed,
-                         max_coverage=args.max_coverage, accept_all=args.accept_all)
+            # kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
+            #              pool_size=args.pool_size, max_reads=args.max_reads, seed=args.seed,
+            #              max_coverage=args.max_coverage, accept_all=args.accept_all)
 
     except Exception as ex:
         logger.error(ex)

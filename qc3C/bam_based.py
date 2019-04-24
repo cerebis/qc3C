@@ -174,11 +174,10 @@ def count_bam_reads(file_name, max_cpu=None):
     return int(proc.stdout.readline())
 
 
-def print_report(report, output=None, sep='\t'):
+def print_report(report, sep='\t'):
     """
     Create a tabular report in CSV format
     :param report: the QcInfo instance to report
-    :param output: if None print the table to stdout, otherwise to the specified path
     :param sep: separator to use in table creation
     """
 
@@ -205,13 +204,56 @@ def print_report(report, output=None, sep='\t'):
     df.loc[2:, 'vs_mapped'] = df.loc[2:, 'read_count'] / df.loc[1, 'read_count'] * 100
     df[['vs_total', 'vs_mapped']] = df[['vs_total', 'vs_mapped']].apply(pandas.to_numeric)
 
-    if output is None:
-        print(df.to_csv(None, sep=sep, float_format="%.2f", index=False))
+    print(df.to_csv(None, sep=sep, float_format="%.2f", index=False))
+
+
+def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
+    """
+    Determine the separation between R1 and R2, where the distance is measured from the beginning of each
+    read's alignment.
+    :param r1: read 1
+    :param r2: read 2
+    :return: separation d in base-pairs between r1 and r2
+    """
+
+    assert r1.reference_id == r2.reference_id, 'R1 and R2 are not mapped to the same reference'
+
+    # a FR pair
+    r1rev, r2rev = r1.is_reverse, r2.is_reverse
+    if r1rev and not r2rev or r2rev and not r1rev:
+        # standardise order
+        if r1rev:
+            r1, r2 = r2, r1
+        # read starts and length
+        x1 = r1.pos
+        x2 = r2.pos + r2.alen
+
+        d = x2 - x1
+
+        if d < 0:
+            # assume shortest distance, as the contig length cannot suffice to
+            # determine alternative of circular "modulo chromosome"
+            d = -d
+
+    # FF and RR pairs
     else:
-        df.to_csv(output, sep=sep, float_format="%.2f", index=False)
+        x1 = r1.pos
+        if r1.is_reverse:
+            x1 += r1.alen
+        x2 = r2.pos
+        if r2.is_reverse:
+            x2 += r2.alen
+
+        # assume shortest distance, as the contig length cannot suffice to
+        # determine alternative of circular "modulo chromosome"
+        if x2 < x1:
+            x1, x2 = x2, x1
+        d = x2 - x1
+
+    return d
 
 
-def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
+def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
 
     report = QcInfo(enzymes)
 
@@ -222,12 +264,11 @@ def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
     with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
         ref_lengths = [li for li in bam.lengths]
-        # ref_names = [ni for ni in bam.references]
 
-        # pair_log = {}
-
-        # rmate = None
-        # prev_r = None
+        r_prev = None
+        all_cis_count = 0
+        distant_count = 0
+        distant_thres = 2 * mean_insert
 
         progress = None
         try:
@@ -244,17 +285,16 @@ def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
                     r = next(bam_iter)
                     progress.update()
 
-                    # report._global.total += 1
-                    # if r.is_unmapped:
-                    #     continue
+                    # mate tracking
+                    if r_prev is not None:
+                        if r.query_name == r_prev.query_name and r.reference_id == r_prev.reference_id:
+                            d = pair_separation(r, r_prev)
+                            # count pairs which are separated by more than a threshold over the length of insert
+                            if d > distant_thres:
+                                distant_count += 1
+                            all_cis_count += 1
 
-                    # if args.log:
-                    #     if prev_r is not None:
-                    #         if r.query_name == prev_r.query_name:
-                    #             rmate = prev_r
-                    #         else:
-                    #             rmate = None
-                    #     prev_r = r
+                    r_prev = r
 
                     if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
                         # reads which align to the ends of references are ignored
@@ -287,18 +327,6 @@ def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
                             found_lig = True
                             report.enzyme[lig.enzyme_name].cs_term += 1
 
-                            # if args.log:
-                            #     # record those pairs which at least have one cut-site terminated read
-                            #     pair_log.setdefault(r.query_name, set()).add(
-                            #         pair_info(ref_names[r.reference_id], r.reference_start, r.reference_length,
-                            #                   r.is_reverse, r.cigarstring))
-                            #     if rmate is not None :
-                            #         if rmate.query_name != r.query_name:
-                            #             break
-                            #         pair_log[r.query_name].add(
-                            #             pair_info(ref_names[rmate.reference_id], rmate.reference_start,
-                            #                       rmate.reference_length, rmate.is_reverse, rmate.cigarstring))
-
                             # a proximity ligation product should contain a characteristic
                             # sequence which duplicates a portion of the cut-site. Check
                             # and see if the read contains this.
@@ -309,7 +337,7 @@ def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
 
                                 sa_dict = parse_secondary_alignment_tag(r)
                                 if sa_dict is not None:
-                                    # TODO either use this inforation to stop parsing.
+                                    # TODO either use this information to stop parsing.
                                     report.enzyme[lig.enzyme_name].is_split += 1
 
                             break
@@ -317,14 +345,12 @@ def analyze(bam_file, enzymes, output, threads=1, sep='\t'):
                     if not found_lig:
                         report._global.no_site += 1
 
-                except StopIteration as e:
+                except StopIteration:
                     break
         finally:
             if progress:
                 progress.close()
 
-    print_report(report, output, sep)
+    logger.info('Distantly separated pairs: {} {:.2g}%'.format(distant_count, distant_count / all_cis_count * 100))
 
-    # if args.log:
-    #     logger.info('Writing pairs which contained cut-sites to log...')
-    #     json.dump(pair_log, open('pairs_log.toml', 'w'))
+    print_report(report, sep)
