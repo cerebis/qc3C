@@ -33,6 +33,8 @@ def main():
     CLI for BAM based analysis
     """
     cmd_bam.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
+    cmd_bam.add_argument('-a', '--alpha', type=float, default=2,
+                         help='Distance threshold multiplier [2*mean_insert]')
     cmd_bam.add_argument('-m', '--mean-insert', type=int, required=True,
                           help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_bam.add_argument('BAM', help='Input name-sorted bam file of Hi-C reads mapped to references')
@@ -95,7 +97,8 @@ def main():
 
         # BAM based analysis
         if args.command == 'bam':
-            bam.analyze(args.BAM, args.enzyme, args.mean_insert, threads=args.threads, sep=args.sep)
+            bam.analyze(args.BAM, args.enzyme, args.mean_insert, alpha=args.alpha,
+                        threads=args.threads, sep=args.sep)
 
         # Kmer based analysis
         elif args.command == 'kmer':

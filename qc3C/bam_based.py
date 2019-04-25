@@ -12,6 +12,7 @@ from recordclass import recordclass
 from collections import namedtuple
 from collections.abc import Collection
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from qc3C.exceptions import NameSortingException
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ def print_report(report, sep='\t'):
     df.loc[2:, 'vs_mapped'] = df.loc[2:, 'read_count'] / df.loc[1, 'read_count'] * 100
     df[['vs_total', 'vs_mapped']] = df[['vs_total', 'vs_mapped']].apply(pandas.to_numeric)
 
+    print('\nQC details:')
     print(df.to_csv(None, sep=sep, float_format="%.2f", index=False))
 
 
@@ -253,7 +255,7 @@ def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
     return d
 
 
-def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
+def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
 
     report = QcInfo(enzymes)
 
@@ -263,12 +265,15 @@ def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
 
     with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
+        if 'SO' not in bam.header['HD'] or bam.header['HD']['SO'] != 'queryname':
+            raise NameSortingException(bam_file)
+
         ref_lengths = [li for li in bam.lengths]
 
         r_prev = None
         all_cis_count = 0
         distant_count = 0
-        distant_thres = 2 * mean_insert
+        distant_thres = alpha * mean_insert
 
         progress = None
         try:
@@ -351,6 +356,8 @@ def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
             if progress:
                 progress.close()
 
-    logger.info('Distantly separated pairs: {} {:.2g}%'.format(distant_count, distant_count / all_cis_count * 100))
+    logger.info('Total number of cis-mapping pairs: {}'.format(all_cis_count))
+    logger.info('Distantly separated cis-mapping pairs: {} {:.2g}%'.format(
+        distant_count, distant_count / all_cis_count * 100))
 
     print_report(report, sep)
