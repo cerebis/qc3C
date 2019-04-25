@@ -41,7 +41,7 @@ COPY --from=builder /usr/local/lib/pkgconfig lib/pkgconfig/
 COPY --from=builder /usr/local/lib/python3.7/site-packages lib/python3.7/site-packages/
 
 # further setup
-COPY ./root/ /
+COPY ./root/usr /usr/
 
 ENV HOME=/opt/app-root/ \
     PATH=/opt/app-root/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
