@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import numpy as np
 import os
 import re
 import subprocess
@@ -22,8 +23,8 @@ PairInfo = namedtuple('pair_info', ('name', 'pos', 'length', 'is_reverse', 'ciga
 # mutable tuples used in storing counting statistics on evidence of proximity ligation events.
 # information pertaining to the entire read-set
 GlobalInfo = recordclass('global_info',
-                         ('ref_term', 'no_site', 'full_align', 'early_term', 'total'),
-                         defaults=(0,) * 5)
+                         ('ref_term', 'no_site', 'full_align', 'early_term', 'low_mapq', 'total'),
+                         defaults=(0,) * 6)
 
 # information specific an enzyme's action
 CutSiteInfo = recordclass('cutsite_info',
@@ -54,20 +55,20 @@ class QcInfo(object):
         """
         if not isinstance(enzymes, Collection) or isinstance(enzymes, str):
             enzymes = [enzymes]
-        self._global = GlobalInfo()
+        self.global_info = GlobalInfo()
         self.enzyme = {en: CutSiteInfo() for en in enzymes}
 
     def total(self):
         """
         :return: the total number of reads
         """
-        return self._global.total
+        return self.global_info.total
 
     def mapped(self):
         """
         :return: the total number of mapped reads
         """
-        return self._global.ref_term + self._global.full_align + self._global.early_term
+        return self.global_info.ref_term + self.global_info.full_align + self.global_info.early_term
 
 
 # Mapping of cigar characters to code values
@@ -182,15 +183,16 @@ def print_report(report, sep='\t'):
     :param sep: separator to use in table creation
     """
 
-    total = report.mapped()
+    total = report.total()
     _cnames = ['enzyme', 'variable', 'read_count', 'vs_total', 'vs_mapped']
 
     df = pandas.DataFrame([['all', 'total', total, None, None],
                            ['all', 'mapped', report.mapped(), None, None],
-                           ['all', 'fully aligned', report._global.full_align, None, None],
-                           ['all', 'early termination', report._global.early_term, None, None],
-                           ['all', 'ref termination', report._global.ref_term, None, None],
-                           ['all', 'no cutsite', report._global.no_site, None, None]],
+                           ['all', 'low_mapq', report.global_info.low_mapq, None, None],
+                           ['all', 'fully aligned', report.global_info.full_align, None, None],
+                           ['all', 'early termination', report.global_info.early_term, None, None],
+                           ['all', 'ref termination', report.global_info.ref_term, None, None],
+                           ['all', 'no cutsite', report.global_info.no_site, None, None]],
                           columns=_cnames)
 
     for enz, inf in report.enzyme.items():
@@ -220,7 +222,7 @@ def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
 
     assert r1.reference_id == r2.reference_id, 'R1 and R2 are not mapped to the same reference'
 
-    # a FR pair
+    # Treat FR pairs only
     r1rev, r2rev = r1.is_reverse, r2.is_reverse
     if r1rev and not r2rev or r2rev and not r1rev:
         # standardise order
@@ -232,30 +234,24 @@ def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
 
         d = x2 - x1
 
-        if d < 0:
-            # assume shortest distance, as the contig length cannot suffice to
-            # determine alternative of circular "modulo chromosome"
-            d = -d
+        # only consider situations where separation of start-points is a positive quantity
+        if d > 0:
+            return d
+        # elif d == 0:
+        #     print(r1)
+        #     print(r2)
+        #     print(x1, x2, r1rev, r2rev)
+        #     raise NotImplemented()
 
-    # FF and RR pairs
-    else:
-        x1 = r1.pos
-        if r1.is_reverse:
-            x1 += r1.alen
-        x2 = r2.pos
-        if r2.is_reverse:
-            x2 += r2.alen
-
-        # assume shortest distance, as the contig length cannot suffice to
-        # determine alternative of circular "modulo chromosome"
-        if x2 < x1:
-            x1, x2 = x2, x1
-        d = x2 - x1
-
-    return d
+    return None
 
 
-def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
+def strong_match(r, minmatch):
+    cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
+    return not r.is_secondary and not r.is_supplementary and cig[0] == 0 and cig[1] >= minmatch
+
+
+def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
 
     report = QcInfo(enzymes)
 
@@ -271,9 +267,12 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
         ref_lengths = [li for li in bam.lengths]
 
         r_prev = None
+        low_mapq = 0
         all_cis_count = 0
-        distant_count = 0
-        distant_thres = alpha * mean_insert
+        close_sum = 0
+        close_count = 0
+        bins = [1000, 5000, 10000]
+        counts = np.zeros(3, dtype=np.int)
 
         progress = None
         try:
@@ -290,24 +289,48 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
                     r = next(bam_iter)
                     progress.update()
 
+                    report.global_info.total += 1
+
+                    if r.mapping_quality < 60:
+                        report.global_info.low_mapq += 1
+                        continue
+
                     # mate tracking
                     if r_prev is not None:
-                        if r.query_name == r_prev.query_name and r.reference_id == r_prev.reference_id:
+
+                        # cis-mapping, well mapped pairs
+                        if r.query_name == r_prev.query_name and \
+                                r.reference_id == r_prev.reference_id and \
+                                strong_match(r, 10) and \
+                                strong_match(r_prev, 10):
+
                             d = pair_separation(r, r_prev)
-                            # count pairs which are separated by more than a threshold over the length of insert
-                            if d > distant_thres:
-                                distant_count += 1
-                            all_cis_count += 1
+                            if d is not None:
+
+                                # track the number of pairs observed for the requested separation distances
+                                if d >= bins[0]:
+                                    counts[0] += 1
+                                if d >= bins[1]:
+                                    counts[1] += 1
+                                if d >= bins[2]:
+                                    counts[2] += 1
+
+                                # keep a count of those pairs which are within the "WGS" region
+                                if 50 < d < 1000:
+                                    close_sum += d
+                                    close_count += 1
+
+                                all_cis_count += 1
 
                     r_prev = r
 
                     if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
                         # reads which align to the ends of references are ignored
-                        report._global.ref_term += 1
+                        report.global_info.ref_term += 1
                         continue
 
                     if r.query_length == r.reference_length:
-                        report._global.full_align += 1
+                        report.global_info.full_align += 1
                         # fully aligned reads can't be tested for the junction but
                         # we can still test for the cut-site
                         seq = get_forward_strand(r)
@@ -317,18 +340,18 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
                                 break
                         continue
 
-                    report._global.early_term += 1
+                    report.global_info.early_term += 1
 
                     # inspect all sequences in as 5'-3'
                     seq = get_forward_strand(r)
 
                     # the aligned sequence, which should end with cut-site
-                    aseq = seq[:r.reference_length]
+                    aln_seq = seq[:r.reference_length]
 
                     # check that a cut-site exists on the end
                     found_lig = False
                     for lig in ligation_variants:
-                        if aseq.endswith(lig.end_match):
+                        if aln_seq.endswith(lig.end_match):
                             found_lig = True
                             report.enzyme[lig.enzyme_name].cs_term += 1
 
@@ -336,8 +359,8 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
                             # sequence which duplicates a portion of the cut-site. Check
                             # and see if the read contains this.
                             # Note: less often, read needs may not have enough remaining seq!
-                            jseq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
-                            if jseq.endswith(lig.junction):
+                            jnc_seq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
+                            if jnc_seq.endswith(lig.junction):
                                 report.enzyme[lig.enzyme_name].read_thru += 1
 
                                 sa_dict = parse_secondary_alignment_tag(r)
@@ -348,7 +371,7 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
                             break
 
                     if not found_lig:
-                        report._global.no_site += 1
+                        report.global_info.no_site += 1
 
                 except StopIteration:
                     break
@@ -356,8 +379,17 @@ def analyze(bam_file, enzymes, mean_insert, alpha, threads=1, sep='\t'):
             if progress:
                 progress.close()
 
+    logger.info('Total number of mapped reads: {}'.format(n_reads))
+    logger.info('Total number of low mapq reads: {}'.format(report.global_info.low_mapq))
     logger.info('Total number of cis-mapping pairs: {}'.format(all_cis_count))
-    logger.info('Distantly separated cis-mapping pairs: {} {:.2g}%'.format(
-        distant_count, distant_count / all_cis_count * 100))
+    close_avg = close_sum / close_count
+    logger.info('Closely separated cis-mapping average length: {:.1f}'.format(close_avg))
+    empirical_diff = abs((close_avg - mean_insert) / mean_insert)
+    if empirical_diff > 0.2:
+        logger.warning('Empirical insert length estimation differs '
+                       'from supplied insert length by {:.2f}%'.format(empirical_diff*100))
+    logger.info('Distance intervals: {}'.format(bins))
+    logger.info('Cis-mapping pairs: {}'.format(counts))
+    logger.info('Proportion: {}'.format(counts / all_cis_count * 100))
 
     print_report(report, sep)
