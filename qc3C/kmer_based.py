@@ -8,6 +8,7 @@ import logging
 
 from collections import namedtuple
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from qc3C.utils import init_random_state
 
 try:
     import dna_jellyfish
@@ -116,9 +117,9 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
     :param starts_with_cutsite: the number of reads which began with a cut-site
     """
 
-    logger.info("Fraction of reads starting with a cut site: {:.3g}".format(starts_with_cutsite / reads_evaluated))
-    logger.info("Expected fraction at 50% GC: {:.3g}".format(1 / np.power(4, site_size / 2)))
-    logger.info("Fraction of reads containing the junction sequence: {:.3g}".format(len(hic) / reads_evaluated))
+    logger.info('Fraction of reads starting with a cut site: {:#.4g}'.format(starts_with_cutsite / reads_evaluated))
+    logger.info('Expected fraction at 50% GC: {:#.4g}'.format(1 / np.power(4, site_size / 2)))
+    logger.info('Fraction of reads containing the junction sequence: {:#.4g}'.format(len(hic) / reads_evaluated))
 
     cur_pval = 0
     sum_pvals = 0
@@ -132,23 +133,18 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
 
     fraction_hic = sum_pvals / reads_evaluated
     hic_stddev = np.sqrt(var_pvals) / reads_evaluated
+
+    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
+
     if mean_insert is not None:
         unobserved_fraction = (mean_insert - (read_length / reads_evaluated) * 2) / mean_insert
         fraction_hic += fraction_hic * unobserved_fraction
-
-    logger.info("Estimated Hi-C read fraction via p-value sum method: "
-                "{:.4g} +/- {:.4g}".format(fraction_hic, hic_stddev))
-
-    if mean_insert is None:
-        logger.info("To adjust the estimate for unobserved sequence between paired-end reads,\n"
-                    "specify the average library fragment size with the --mean-insert= option")
-    else:
-        logger.info("The estimate above has been adjusted for unobserved junction sequences\n"
-                    "based on an average fragment length of {:.4g}nt".format(mean_insert))
+        logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'.format(mean_insert))
+        logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
 
-def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None, pool_size=None,
-            max_reads=None, accept_all=False, max_coverage=500):
+def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
+            sample_rate=None, max_coverage=500):
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -160,9 +156,7 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     :param mean_insert: mean length of inserts used in creating the library
     :param output: write collected junction observations to file
     :param seed: random seed used in subsampling read-set
-    :param pool_size: the total number of reads -- allows skipping counting them
-    :param max_reads: the number of examples to collect before stopping, if none process entire read-set
-    :param accept_all: simply accept every occcurence encountered
+    :param sample_rate: probability of accepting an observation. If None accept all.
     :param max_coverage: ignore kmers with coverage greater than this value
     """
 
@@ -214,7 +208,7 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
             if seq_len < 2 * k_size + site_size + 1:
                 continue
             # subsampling read-set
-            if unif() > prob_accept:
+            if prob_accept is not None and prob_accept < unif():
                 continue
             # search for the site
             _seq = _seq.upper()
@@ -238,6 +232,11 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     assert k_size - site_size > 0, 'Kmer size must be larger the the junction size'
     assert (k_size - site_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
 
+    # for efficiency, disable sampling if rate is 1
+    if sample_rate == 1:
+        logger.info('Disabling sampling as requested rate was equal to 1')
+        sample_rate = None
+
     # initialize jellyfish API
     dna_jellyfish.MerDNA_k(k_size)
     query_jf = dna_jellyfish.QueryMerFile(kmer_db)
@@ -248,28 +247,19 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     INNER_IX = ~ OUTER_IX
 
     # either count the reads or use the information provided by the user.
-    if pool_size is None:
-        logger.info('No pool size provided, counting FastQ reads...')
-        n_reads = count_fastq_sequences(fastq)
-        logger.info('Found {} reads in {}'.format(n_reads, fastq))
-    else:
-        n_reads = pool_size
+    logger.info('Counting reads...')
+    n_reads = count_fastq_sequences(fastq)
+    logger.info('There were {} reads in {}'.format(n_reads, fastq))
 
     # probability of acceptance for subsampling
-    if accept_all:
-        prob_accept = 1.0
-        logger.info('Accepting all useable reads')
+    if sample_rate is None or sample_rate == 1:
+        logger.info('Accepting all usable reads')
+        sample_rate = None
     else:
-        prob_accept = 1.0 if max_reads*10 >= n_reads else max_reads / n_reads * 10
-        logger.info('Acceptance threshold: {:.2g}'.format(prob_accept))
+        logger.info('Acceptance threshold: {:#.2g}'.format(sample_rate))
 
     # set up random number generation
-    if seed is None:
-        seed = np.random.randint(1000000, 99999999)
-        logger.info('Random seed was not set, using {}'.format(seed))
-    else:
-        logger.info('Random seed was {}'.format(seed))
-    random_state = np.random.RandomState(seed)
+    random_state = init_random_state(seed)
     unif = random_state.uniform
     randint = random_state.randint
 
@@ -278,13 +268,14 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     read_length = 0
     half_site = site[0:site_size//2]
 
-    with tqdm.tqdm(desc="Pool  ", total=n_reads, ncols=80) as pb_read_pool, \
-            tqdm.tqdm(desc="Sample", total=max_reads, ncols=80) as pb_sample:
+    logger.info('Beginning analysis...')
+
+    with tqdm.tqdm(desc="Progress", total=n_reads) as progress:
 
         cov_obs = []
 
         # set up the generator over FastQ reads, with sub-sampling
-        fq_reader = next_read(fastq, site, k_size, prob_accept, pb_read_pool)
+        fq_reader = next_read(fastq, site, k_size, sample_rate, progress)
 
         while True:
 
@@ -293,12 +284,10 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
             try:
                 seq, ix, _id, seq_len = next(fq_reader)
             except StopIteration:
-                # we need to manually close these progress bars if we don't want
-                # nearby print statements to interfere
-                # TODO doing this makes the with() statement sorta useless
-                pb_read_pool.close()
-                pb_sample.close()
-                logger.info('End of FastQ file reached before filling requested quota')
+                # # we need to manually close these progress bars if we don't want
+                # # nearby print statements to interfere
+                # # TODO doing this makes the with() statement sorta useless
+                # progress.close()
                 break
 
             reads_evaluated += 1
@@ -349,12 +338,6 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
 
             # record this observation
             cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
-            pb_sample.update()
-
-            # if we have reached a requested number of observations
-            # then stop processing
-            if max_reads is not None and len(cov_obs) == max_reads:
-                break
 
     # lets do some tabular munging, making sure that our categories are explicit
     all_df = pandas.DataFrame(cov_obs)

@@ -18,6 +18,12 @@ def main():
     global_parser.add_argument('--sep', default='\t', help='Delimiter to use in report table')
     global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
                                help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
+    global_parser.add_argument('-p', '--sample-rate', default=None, type=float,
+                               help='Sample only a proportion of all read-pairs [None]')
+    global_parser.add_argument('-m', '--mean-insert', type=int, required=True,
+                               help='Mean fragment length to use in estimating the unobserved junction rate')
+    global_parser.add_argument('-s', '--seed', type=int,
+                               help='Random seed used in sampling the read-set')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
@@ -33,25 +39,13 @@ def main():
     CLI for BAM based analysis
     """
     cmd_bam.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
-    cmd_bam.add_argument('-m', '--mean-insert', type=int, required=True,
-                          help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_bam.add_argument('BAM', help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
     CLI for Kmer based analysis
     """
-    cmd_kmer.add_argument('-s', '--seed', type=int,
-                          help='Random seed used in sampling the read-set')
-    cmd_kmer.add_argument('-n', '--max-reads', default=500000, type=int,
-                          help='Stop after collecting N sample reads')
-    cmd_kmer.add_argument('-a', '--accept-all', default=False, action='store_true',
-                          help='Override acceptance rate and accept all useable reads')
-    cmd_kmer.add_argument('-m', '--mean-insert', type=int,
-                          help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int,
                           help='Ignore regions with more than this coverage')
-    cmd_kmer.add_argument('-N', '--pool-size', type=int,
-                          help='The total number of reads which are being provided for consideration')
     cmd_kmer.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
     cmd_kmer.add_argument('FASTQ', help='FastQ file used in making the kmer database')
     cmd_kmer.add_argument('KMER_DB', help='Jellyfish kmer database')
@@ -93,16 +87,19 @@ def main():
 
     try:
 
+        if args.sample_rate is not None:
+            assert 0 < args.sample_rate <= 1, 'Sample rate must be within the range (0,1]'
+
         # BAM based analysis
         if args.command == 'bam':
-            bam.analyze(args.BAM, args.enzyme, args.mean_insert, threads=args.threads, sep=args.sep)
+            bam.analyze(args.BAM, args.enzyme, args.mean_insert, seed=args.seed,
+                        sample_rate=args.sample_rate, threads=args.threads, sep=args.sep)
 
         # Kmer based analysis
         elif args.command == 'kmer':
             assert len(args.enzyme) == 1, 'Kmer-based approach currently supports only a single enzyme'
             kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
-                         pool_size=args.pool_size, max_reads=args.max_reads, seed=args.seed,
-                         max_coverage=args.max_coverage, accept_all=args.accept_all)
+                         sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage)
 
     except Exception as ex:
         logger.error(ex)

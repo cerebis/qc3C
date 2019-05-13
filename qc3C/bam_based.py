@@ -1,19 +1,20 @@
-import json
+import logging
 import multiprocessing
 import numpy as np
 import os
-import re
-import subprocess
 import pandas
 import pysam
+import re
+import subprocess
 import tqdm
-import logging
 
-from recordclass import recordclass
 from collections import namedtuple
 from collections.abc import Collection
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from recordclass import recordclass
+
 from qc3C.exceptions import NameSortingException
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from qc3C.utils import init_random_state
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +39,6 @@ class QcInfo(object):
     over an entire BAM file.
     """
 
-    class EncodeCounter(json.JSONEncoder):
-        def default(self, o):
-            print(o.__class__, o.__class__.__bases__)
-            if isinstance(o, QcInfo):
-                d = o._asdict()
-                d.update({'enzyme': o.enzyme})
-                return d
-            if isinstance(o, CutSiteInfo):
-                return o._asdict()
-            raise TypeError()
-
     def __init__(self, enzymes):
         """
         :param enzymes: the enzymes used in creating the Hi-C library
@@ -64,7 +54,7 @@ class QcInfo(object):
         """
         return self.global_info.total
 
-    def mapped(self):
+    def accepted(self):
         """
         :return: the total number of mapped reads
         """
@@ -159,21 +149,40 @@ def exe_exists(exe_name):
     return False
 
 
-def count_bam_reads(file_name, max_cpu=None):
+def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = None, max_cpu: int = None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
     :param file_name: a bam file to scan (neither sorted nor an index is required)
+    :param paired: when True, count only reads of mapped pairs (primary alignments only)
+    :param mapped: when True, count only reads which are mapped
+    :param mapq: count only reads with mapping quality greater than this value
     :param max_cpu: set the maximum number of CPUS to use in counting (otherwise all cores)
     :return: estimated number of mapped reads
     """
     assert exe_exists('samtools'), 'required tool samtools was not found on path'
     assert exe_exists('wc'), 'required tool wc was not found on path'
+    assert not (paired and mapped), 'Cannot set paired and mapped simultaneously'
+
+    opts = ['samtools', 'view', '-c']
     if max_cpu is None:
         max_cpu = multiprocessing.cpu_count()
-    proc = subprocess.Popen(['samtools', 'view', '-c', '-@{}'.format(max_cpu), file_name],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return int(proc.stdout.readline())
+    opts.append('-@{}'.format(max_cpu))
+
+    if paired:
+        opts.append('-F0xC0C')
+    elif mapped:
+        opts.append('-F0xC00')
+
+    if mapq:
+        opts.append('-q{}'.format(mapq))
+
+    proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    count = int(proc.stdout.readline())
+    if paired and count % 2 != 0:
+        logger.warning('When counting paired reads, the total was not divisible by 2.')
+    return count
 
 
 def print_report(report, sep='\t'):
@@ -184,10 +193,10 @@ def print_report(report, sep='\t'):
     """
 
     total = report.total()
-    _cnames = ['enzyme', 'variable', 'read_count', 'vs_total', 'vs_mapped']
+    _cnames = ['enzyme', 'variable', 'read_count', 'vs_total', 'vs_accepted']
 
     df = pandas.DataFrame([['all', 'total', total, None, None],
-                           ['all', 'mapped', report.mapped(), None, None],
+                           ['all', 'accepted', report.accepted(), None, None],
                            ['all', 'low_mapq', report.global_info.low_mapq, None, None],
                            ['all', 'fully aligned', report.global_info.full_align, None, None],
                            ['all', 'early termination', report.global_info.early_term, None, None],
@@ -203,12 +212,12 @@ def print_report(report, sep='\t'):
                                   columns=_cnames)
         df = df.append(df_enz, ignore_index=True)
 
-    df.loc[1:, 'vs_total'] = df.loc[1:, 'read_count'] / df.loc[0, 'read_count'] * 100
-    df.loc[2:, 'vs_mapped'] = df.loc[2:, 'read_count'] / df.loc[1, 'read_count'] * 100
-    df[['vs_total', 'vs_mapped']] = df[['vs_total', 'vs_mapped']].apply(pandas.to_numeric)
+    df.loc[1:, 'vs_total'] = df.loc[1:, 'read_count'] / df.loc[0, 'read_count']
+    df.loc[2:, 'vs_accepted'] = df.loc[2:, 'read_count'] / df.loc[1, 'read_count']
+    df[['vs_total', 'vs_accepted']] = df[['vs_total', 'vs_accepted']].apply(pandas.to_numeric)
 
     print('\nQC details:')
-    print(df.to_csv(None, sep=sep, float_format="%.2f", index=False))
+    print(df.to_csv(None, sep=sep, float_format="%#.4g", index=False))
 
 
 def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
@@ -251,13 +260,20 @@ def strong_match(r, minmatch):
     return not r.is_secondary and not r.is_supplementary and cig[0] == 0 and cig[1] >= minmatch
 
 
-def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
+def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_mapq=60, threads=1, sep='\t'):
 
     report = QcInfo(enzymes)
 
     ligation_variants = []
     for ename in enzymes:
         ligation_variants.append(ligation_junction_seq(get_enzyme_instance(ename)))
+
+    # for efficiency, disable sampling if rate is 1
+    if sample_rate == 1 or sample_rate is None:
+        logger.info('Accepting all usable reads')
+        sample_rate = None
+    else:
+        logger.info('Acceptance threshold: {:#.3g}'.format(sample_rate))
 
     with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
@@ -267,129 +283,155 @@ def analyze(bam_file, enzymes, mean_insert, threads=1, sep='\t'):
         ref_lengths = [li for li in bam.lengths]
 
         r_prev = None
-        low_mapq = 0
         all_cis_count = 0
-        close_sum = 0
-        close_count = 0
-        bins = [1000, 5000, 10000]
-        counts = np.zeros(3, dtype=np.int)
+        short_sum = 0
+        short_count = 0
+        long_counts = np.zeros(3, dtype=np.int)
+        long_bins = (1000, 5000, 10000)
 
-        progress = None
-        try:
+        # begin with user supplied median estimate
+        short_median_est = mean_insert
 
-            logger.info('Counting reads in bam file...')
-            n_reads = count_bam_reads(bam_file, threads)
+        logger.info('Counting alignments...')
+        n_reads = count_bam_reads(bam_file, max_cpu=threads)
+        logger.info('There were {} alignments in {}'.format(n_reads, bam_file))
 
-            logger.info('Analyzing bam file...')
-            progress = tqdm.tqdm(total=n_reads)
+        random_state = init_random_state(seed)
+        unif = random_state.uniform
+
+        logger.info('Beginning analysis...')
+        with tqdm.tqdm(desc='Progress', total=n_reads) as progress:
+
             bam_iter = bam.fetch(until_eof=True)
+
             while True:
 
                 try:
                     r = next(bam_iter)
                     progress.update()
-
-                    report.global_info.total += 1
-
-                    if r.mapping_quality < 60:
-                        report.global_info.low_mapq += 1
-                        continue
-
-                    # mate tracking
-                    if r_prev is not None:
-
-                        # cis-mapping, well mapped pairs
-                        if r.query_name == r_prev.query_name and \
-                                r.reference_id == r_prev.reference_id and \
-                                strong_match(r, 10) and \
-                                strong_match(r_prev, 10):
-
-                            d = pair_separation(r, r_prev)
-                            if d is not None:
-
-                                # track the number of pairs observed for the requested separation distances
-                                if d >= bins[0]:
-                                    counts[0] += 1
-                                if d >= bins[1]:
-                                    counts[1] += 1
-                                if d >= bins[2]:
-                                    counts[2] += 1
-
-                                # keep a count of those pairs which are within the "WGS" region
-                                if 50 < d < 1000:
-                                    close_sum += d
-                                    close_count += 1
-
-                                all_cis_count += 1
-
-                    r_prev = r
-
-                    if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
-                        # reads which align to the ends of references are ignored
-                        report.global_info.ref_term += 1
-                        continue
-
-                    if r.query_length == r.reference_length:
-                        report.global_info.full_align += 1
-                        # fully aligned reads can't be tested for the junction but
-                        # we can still test for the cut-site
-                        seq = get_forward_strand(r)
-                        for lig in ligation_variants:
-                            if seq.endswith(lig.end_match):
-                                report.enzyme[lig.enzyme_name].cs_full += 1
-                                break
-                        continue
-
-                    report.global_info.early_term += 1
-
-                    # inspect all sequences in as 5'-3'
-                    seq = get_forward_strand(r)
-
-                    # the aligned sequence, which should end with cut-site
-                    aln_seq = seq[:r.reference_length]
-
-                    # check that a cut-site exists on the end
-                    found_lig = False
-                    for lig in ligation_variants:
-                        if aln_seq.endswith(lig.end_match):
-                            found_lig = True
-                            report.enzyme[lig.enzyme_name].cs_term += 1
-
-                            # a proximity ligation product should contain a characteristic
-                            # sequence which duplicates a portion of the cut-site. Check
-                            # and see if the read contains this.
-                            # Note: less often, read needs may not have enough remaining seq!
-                            jnc_seq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
-                            if jnc_seq.endswith(lig.junction):
-                                report.enzyme[lig.enzyme_name].read_thru += 1
-
-                                sa_dict = parse_secondary_alignment_tag(r)
-                                if sa_dict is not None:
-                                    # TODO either use this information to stop parsing.
-                                    report.enzyme[lig.enzyme_name].is_split += 1
-
-                            break
-
-                    if not found_lig:
-                        report.global_info.no_site += 1
-
                 except StopIteration:
                     break
-        finally:
-            if progress:
-                progress.close()
 
-    logger.info('Total number of mapped reads: {}'.format(n_reads))
-    logger.info('Total number of low mapq reads: {}'.format(report.global_info.low_mapq))
-    logger.info('Total number of cis-mapping pairs: {}'.format(all_cis_count))
-    close_avg = close_sum / close_count
-    logger.info('Closely separated cis-mapping average length: {:.1f}'.format(close_avg))
-    empirical_diff = abs((close_avg - mean_insert) / mean_insert)
-    if empirical_diff > 0.2:
-        logger.warning('Empirical insert length estimation differs '
-                       'from supplied insert length by {:.2f}%'.format(empirical_diff*100))
-    logger.info('Distance intervals: {}'.format(bins))
-    logger.info('Cis-mapping pairs: {}'.format(counts))
-    logger.info('Proportion: {}'.format(counts / all_cis_count * 100))
+                # if specified, collect only a sampling
+                if sample_rate is not None and sample_rate < unif():
+                    continue
+
+                report.global_info.total += 1
+
+                if r.mapping_quality < min_mapq:
+                    report.global_info.low_mapq += 1
+                    continue
+
+                # mate tracking
+                if r_prev is not None:
+
+                    # cis-mapping, well mapped pairs
+                    if r.query_name == r_prev.query_name and \
+                            r.reference_id == r_prev.reference_id and \
+                            strong_match(r, 10) and \
+                            strong_match(r_prev, 10):
+
+                        d = pair_separation(r, r_prev)
+                        if d is not None:
+
+                            # track the number of pairs observed for the requested separation distances
+                            if d >= long_bins[2]:
+                                long_counts[2] += 1
+                                long_counts[1] += 1
+                                long_counts[0] += 1
+                            elif d >= long_bins[1]:
+                                long_counts[1] += 1
+                                long_counts[0] += 1
+                            elif d >= long_bins[0]:
+                                long_counts[0] += 1
+
+                            # keep a count of those pairs which are within the "WGS" region
+                            if 50 < d < 1000:
+                                short_sum += d
+                                short_count += 1
+
+                                # frugal median estimator
+                                if short_median_est > d:
+                                    short_median_est -= 1
+                                elif short_median_est < d:
+                                    short_median_est += 1
+
+                            all_cis_count += 1
+
+                r_prev = r
+
+                if r.reference_end >= ref_lengths[r.reference_id] or r.reference_start == 0:
+                    # reads which align to the ends of references are ignored
+                    report.global_info.ref_term += 1
+                    continue
+
+                if r.query_length == r.reference_length:
+                    report.global_info.full_align += 1
+                    # fully aligned reads can't be tested for the junction but
+                    # we can still test for the cut-site
+                    seq = get_forward_strand(r)
+                    for lig in ligation_variants:
+                        if seq.endswith(lig.end_match):
+                            report.enzyme[lig.enzyme_name].cs_full += 1
+                            break
+                    continue
+
+                report.global_info.early_term += 1
+
+                # inspect all sequences in as 5'-3'
+                seq = get_forward_strand(r)
+
+                # the aligned sequence, which should end with cut-site
+                aln_seq = seq[:r.reference_length]
+
+                # check that a cut-site exists on the end
+                found_lig = False
+                for lig in ligation_variants:
+                    if aln_seq.endswith(lig.end_match):
+                        found_lig = True
+                        report.enzyme[lig.enzyme_name].cs_term += 1
+
+                        # a proximity ligation product should contain a characteristic
+                        # sequence which duplicates a portion of the cut-site. Check
+                        # and see if the read contains this.
+                        # Note: less often, read needs may not have enough remaining seq!
+                        jnc_seq = seq[:r.reference_length + (lig.junc_len - lig.site_len)]
+                        if jnc_seq.endswith(lig.junction):
+                            report.enzyme[lig.enzyme_name].read_thru += 1
+
+                            sa_dict = parse_secondary_alignment_tag(r)
+                            if sa_dict is not None:
+                                # TODO either use this information to stop parsing.
+                                report.enzyme[lig.enzyme_name].is_split += 1
+
+                        break
+
+                if not found_lig:
+                    report.global_info.no_site += 1
+
+    logger.info('Number of analysed reads: {}'.format(report.global_info.total))
+    logger.info('Number of low mapq reads: {}'.format(report.global_info.low_mapq))
+    logger.info('Number of cis-mapping pairs: {}'.format(all_cis_count))
+
+    logger.info('Number of short-range cis-mapping pairs: {}'.format(short_count))
+    close_avg = short_sum / short_count
+    logger.info('Empirical short-range mean differs from \"mean_insert\" by {:.1f}%'
+                .format((close_avg - mean_insert) / mean_insert * 100))
+    if short_count > 10 * mean_insert:
+        logger.info('Mean and median of short-range pair separation: {:.0f}nt {:.0f}nt'
+                    .format(close_avg, short_median_est))
+    else:
+        logger.warning('Too few short pairs, streaming median estimation would be unreliable')
+        logger.info('Mean of short-range pair separation: {:.0f}nt'.format(close_avg))
+
+    # line-up the fields for ease of reading.
+    field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
+    logger.info('Long-range distance intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
+                .format(*long_bins, w=field_width))
+    logger.info('Number of cis-mapping pairs:   {:>{w[0]}d},   {:>{w[1]}d},   {:>{w[2]}d}'
+                .format(*long_counts, w=field_width))
+    prop = long_counts.astype(np.float) / all_cis_count
+    logger.info('Relative proportion:           {:#>{w[0]}.4g},   {:#>{w[1]}.4g},   {:#>{w[2]}.4g}'
+                .format(*prop, w=field_width))
 
     print_report(report, sep)
