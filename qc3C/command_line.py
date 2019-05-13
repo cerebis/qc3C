@@ -24,6 +24,7 @@ def main():
                                help='Mean fragment length to use in estimating the unobserved junction rate')
     global_parser.add_argument('-s', '--seed', type=int,
                                help='Random seed used in sampling the read-set')
+    global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
@@ -38,7 +39,6 @@ def main():
     """
     CLI for BAM based analysis
     """
-    cmd_bam.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
     cmd_bam.add_argument('BAM', help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
@@ -99,7 +99,8 @@ def main():
         elif args.command == 'kmer':
             assert len(args.enzyme) == 1, 'Kmer-based approach currently supports only a single enzyme'
             kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
-                         sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage)
+                         sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
+                         threads=args.threads)
 
     except Exception as ex:
         logger.error(ex)

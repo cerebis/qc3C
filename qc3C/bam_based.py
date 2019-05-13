@@ -149,7 +149,7 @@ def exe_exists(exe_name):
     return False
 
 
-def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = None, max_cpu: int = None):
+def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = 1, max_cpu: int = None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
@@ -165,7 +165,7 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, 
     assert not (paired and mapped), 'Cannot set paired and mapped simultaneously'
 
     opts = ['samtools', 'view', '-c']
-    if max_cpu is None:
+    if max_cpu > 1:
         max_cpu = multiprocessing.cpu_count()
     opts.append('-@{}'.format(max_cpu))
 

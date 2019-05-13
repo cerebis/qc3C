@@ -8,7 +8,7 @@ import logging
 
 from collections import namedtuple
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
-from qc3C.utils import init_random_state
+from qc3C.utils import init_random_state, test_for_exe
 
 try:
     import dna_jellyfish
@@ -82,7 +82,7 @@ def readfq(fp):
                 break
 
 
-def count_fastq_sequences(file_name):
+def count_fastq_sequences(file_name, max_cpu=1):
     """
     Estimate the number of fasta sequences in a file by counting headers. Decompression
     is automatically attempted for files ending in .gz. Counting and decompression is by
@@ -90,10 +90,17 @@ def count_fastq_sequences(file_name):
     is about 8 times faster than parsing a file with BioPython and 6 times faster than
     reading all lines in Python.
     :param file_name: the fasta file to inspect
+    :param max_cpu: the number of cpus if pigz exists
     :return: the estimated number of records
     """
     if file_name.endswith('.gz'):
-        proc_uncomp = subprocess.Popen(['gzip', '-cd', file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pigz_path = test_for_exe('pigz')
+        if max_cpu > 1 and pigz_path is not None:
+            proc_uncomp = subprocess.Popen([pigz_path, '-p{}'.format(max_cpu), '-cd', file_name],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            proc_uncomp = subprocess.Popen(['gzip', '-cd', file_name],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         proc_read = subprocess.Popen(['grep', r'^@'], stdin=proc_uncomp.stdout, stdout=subprocess.PIPE)
     else:
         proc_read = subprocess.Popen(['grep', r'^@', file_name], stdout=subprocess.PIPE)
@@ -138,13 +145,18 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
 
     if mean_insert is not None:
         unobserved_fraction = (mean_insert - (read_length / reads_evaluated) * 2) / mean_insert
-        fraction_hic += fraction_hic * unobserved_fraction
-        logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'.format(mean_insert))
-        logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
+        if unobserved_fraction < 0:
+            logger.warning('Estimated unobserved fraction < 0, therefore adjustment will not be applied')
+            logger.warning('Check that the supplied mean insert length is not too short')
+        else:
+            logger.info('Estimated unobserved fraction: {:#.4g}'.format(unobserved_fraction))
+            fraction_hic += fraction_hic * unobserved_fraction
+            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'.format(mean_insert))
+            logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
 
 def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
-            sample_rate=None, max_coverage=500):
+            sample_rate=None, max_coverage=500, threads=1):
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -158,6 +170,7 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
     :param max_coverage: ignore kmers with coverage greater than this value
+    :param threads: use additional threads for supported steps
     """
 
     def collect_coverage(seq, ix, site_size, k, min_cov=0):
@@ -248,7 +261,7 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
 
     # either count the reads or use the information provided by the user.
     logger.info('Counting reads...')
-    n_reads = count_fastq_sequences(fastq)
+    n_reads = count_fastq_sequences(fastq, max_cpu=threads)
     logger.info('There were {} reads in {}'.format(n_reads, fastq))
 
     # probability of acceptance for subsampling

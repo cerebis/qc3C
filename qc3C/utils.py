@@ -1,7 +1,32 @@
 import numpy as np
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def test_for_exe(prog_name):
+    """
+    Test whether a program exists on the system. This can be either a full path
+    or just the executable name. This is case sensitive.
+    :param prog_name: the program name with/without path
+    :return: the full path or None
+    """
+
+    def is_exe(fpath):
+        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+    fpath, fname = os.path.split(prog_name)
+    if fpath:
+        if is_exe(prog_name):
+            return prog_name
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            exe_file = os.path.join(path, prog_name)
+            if is_exe(exe_file):
+                return exe_file
+
+    return None
 
 
 def init_random_state(seed: int = None):
