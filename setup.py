@@ -16,6 +16,7 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
 
     install_requires=[
+        'leven',
         'numpy',
         'pandas',
         'pysam',

@@ -1,10 +1,26 @@
+import re
+import numpy as np
+
+from leven import levenshtein
 from collections import namedtuple
-from difflib import SequenceMatcher
 from Bio.Restriction import Restriction
 from qc3C.exceptions import *
 
 # immutable type used in storing information about enzymatic byproducts in proximity ligation
 LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'end_match', 'junc_len', 'site_len'))
+
+
+def leven_ratio(a: str, b: str):
+    """
+    Compute the levenshtein distance between two strings and return
+    the ratio relative to the combined string length
+    :param a: the first string to compare with b
+    :param b: the second string to compare with a
+    :return: a value between 0 and 1, 1 being a perfect match (0 distance)
+    """
+    d = levenshtein(a, b)
+    lsum = len(a) + len(b)
+    return (lsum - d) / lsum
 
 
 def get_enzyme_instance(enz_name):
@@ -14,17 +30,34 @@ def get_enzyme_instance(enz_name):
     :param enz_name: the case-sensitive name of the enzyme
     :return: RestrictionType the enzyme instance
     """
+    # try an exact match
     try:
-        # this has to match exactly
         return getattr(Restriction, enz_name)
+
+    # otherwise, supply a helpful error message
     except AttributeError:
-        # since we're being strict about enzyme names, be helpful with errors
+        # check that the name uses only valid characters
+        if re.search(r'[^0-9A-Za-z]', enz_name) is not None:
+            raise InvalidEnzymeException(enz_name)
+
+        # now look for similar enzyme names to suggest
+        lower_ename = enz_name.lower()
         similar = []
         for a in dir(Restriction):
-            score = SequenceMatcher(None, enz_name.lower(), a.lower()).ratio()
-            if score >= 0.8:
-                similar.append(a)
-        raise UnknownEnzymeException(enz_name, similar)
+            if a[0].isupper() and a[-1].isupper():
+                similar.append((a, leven_ratio(lower_ename, a.lower())))
+
+        similar = np.array(similar, dtype=np.dtype([('name', 'S20'), ('score', np.float)]))
+        top = similar[np.argsort(similar['score'])[-3:]][::-1]
+
+        ix = top['score'] > 0.9
+        # if there are near-perfect matches, only report those
+        if ix.sum() > 0:
+            top = top['name'][ix]
+        # otherwise, try and suggest a few maybes
+        else:
+            top = top['name'][top['score'] > 0.7]
+        raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
 
 
 def ligation_junction_seq(enz, spacer=''):
