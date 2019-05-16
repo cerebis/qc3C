@@ -149,7 +149,7 @@ def exe_exists(exe_name):
     return False
 
 
-def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = 1, max_cpu: int = None):
+def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = None, max_cpu: int = None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
@@ -174,7 +174,8 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, 
     elif mapped:
         opts.append('-F0xC00')
 
-    if mapq:
+    if mapq is not None:
+        assert 0 <= mapq <= 60, 'mapq must be in the range [0,60]'
         opts.append('-q{}'.format(mapq))
 
     proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -260,7 +261,7 @@ def strong_match(r, minmatch):
     return not r.is_secondary and not r.is_supplementary and cig[0] == 0 and cig[1] >= minmatch
 
 
-def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_mapq=60, threads=1, sep='\t'):
+def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_mapq=60, threads=1):
 
     report = QcInfo(enzymes)
 
@@ -292,9 +293,9 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
         # begin with user supplied median estimate
         short_median_est = mean_insert
 
-        logger.info('Counting alignments...')
+        logger.info('Counting alignments in {}'.format(bam_file))
         n_reads = count_bam_reads(bam_file, max_cpu=threads)
-        logger.info('There were {} alignments in {}'.format(n_reads, bam_file))
+        logger.info('Found {} alignments to analyse'.format(n_reads))
 
         random_state = init_random_state(seed)
         unif = random_state.uniform
@@ -434,4 +435,4 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
     logger.info('Relative proportion:           {:#>{w[0]}.4g},   {:#>{w[1]}.4g},   {:#>{w[2]}.4g}'
                 .format(*prop, w=field_width))
 
-    print_report(report, sep)
+    print_report(report)

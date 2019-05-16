@@ -14,17 +14,20 @@ def main():
     import argparse
     import sys
 
+    """
+    Shared CLI arguments
+    """
     global_parser = argparse.ArgumentParser(add_help=False)
-    global_parser.add_argument('--sep', default='\t', help='Delimiter to use in report table')
-    global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', required=True, action='append',
-                               help='Case-sensitive NEB enzyme name. Use multiple times for multiple enzymes')
     global_parser.add_argument('-p', '--sample-rate', default=None, type=float,
                                help='Sample only a proportion of all read-pairs [None]')
-    global_parser.add_argument('-m', '--mean-insert', type=int, required=True,
-                               help='Mean fragment length to use in estimating the unobserved junction rate')
     global_parser.add_argument('-s', '--seed', type=int,
                                help='Random seed used in sampling the read-set')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads')
+    global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
+                               help='One or more case-sensitive NEB enzyme names '
+                                    '(Use multiple times for multiple files enzymes)')
+    global_parser.add_argument('-m', '--mean-insert', type=int, required=True,
+                               help='Mean fragment length to use in estimating the unobserved junction rate')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
@@ -32,23 +35,27 @@ def main():
     subparsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
                                        help='choose an analysis stage for further options')
     subparsers.required = True
-    cmd_bam = subparsers.add_parser('bam', parents=[global_parser],
-                                      description='Alignment-based analysis.')
-    cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser],
-                                        description='Kmer-based analysis.')
+    cmd_bam = subparsers.add_parser('bam', parents=[global_parser], description='Alignment-based analysis.')
+    cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser], description='Kmer-based analysis.')
+
     """
     CLI for BAM based analysis
     """
-    cmd_bam.add_argument('BAM', help='Input name-sorted bam file of Hi-C reads mapped to references')
+    cmd_bam.add_argument('-b', '--bam', required=True,
+                         help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
     CLI for Kmer based analysis
     """
     cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int,
                           help='Ignore regions with more than this coverage')
-    cmd_kmer.add_argument('KMER_SIZE', type=int, help='Kmer size used in database')
-    cmd_kmer.add_argument('FASTQ', help='FastQ file used in making the kmer database')
-    cmd_kmer.add_argument('KMER_DB', help='Jellyfish kmer database')
+    cmd_kmer.add_argument('-k','--kmer_size', type=int, required=True,
+                          help='Kmer size used in database')
+    cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
+                          help='Jellyfish kmer database')
+    cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
+                          help='FastQ format reads used in making the kmer database '
+                               '(Use multiple times for multiple files)')
 
     args = parser.parse_args()
 
@@ -87,21 +94,31 @@ def main():
 
     try:
 
-        if args.sample_rate is not None:
-            assert 0 < args.sample_rate <= 1, 'Sample rate must be within the range (0,1]'
+        if args.threads < 1:
+            parser.error('The number of threads must be greater than 1')
+
+        if args.sample_rate is not None and not (0 < args.sample_rate <= 1):
+            parser.error('Sample rate must be within the range (0,1]')
 
         # BAM based analysis
         if args.command == 'bam':
-            bam.analyze(args.BAM, args.enzyme, args.mean_insert, seed=args.seed,
-                        sample_rate=args.sample_rate, threads=args.threads, sep=args.sep)
+
+            bam.analyze(args.bam, args.enzyme, args.mean_insert, seed=args.seed,
+                        sample_rate=args.sample_rate, threads=args.threads)
 
         # Kmer based analysis
         elif args.command == 'kmer':
-            assert len(args.enzyme) == 1, 'Kmer-based approach currently supports only a single enzyme'
-            kmer.analyze(args.KMER_SIZE, args.enzyme[0], args.KMER_DB, args.FASTQ, args.mean_insert,
+
+            if len(set(args.reads)) != len(args.reads):
+                parser.error('Some supplied input read-sets are the same file')
+
+            if len(args.enzyme) > 1:
+                parser.error('kmer analysis mode only supports a single enyzme')
+
+            kmer.analyze(args.kmer_size, args.enzyme[0], args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
                          threads=args.threads)
 
     except Exception as ex:
-        logger.error(ex)
+        logger.exception(ex)
         sys.exit(1)

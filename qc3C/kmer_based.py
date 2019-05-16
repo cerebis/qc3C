@@ -155,7 +155,7 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
             logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
 
-def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
+def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=None,
             sample_rate=None, max_coverage=500, threads=1):
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
@@ -164,7 +164,7 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     :param k_size: kmer size used when building the kmer database 
     :param enzyme: the enzyme used during digestion 
     :param kmer_db: the jellyfish kmer database
-    :param fastq: the reads as FastQ format.
+    :param read_list: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
     :param output: write collected junction observations to file
     :param seed: random seed used in subsampling read-set
@@ -260,9 +260,11 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
     INNER_IX = ~ OUTER_IX
 
     # either count the reads or use the information provided by the user.
-    logger.info('Counting reads...')
-    n_reads = count_fastq_sequences(fastq, max_cpu=threads)
-    logger.info('There were {} reads in {}'.format(n_reads, fastq))
+    n_reads = 0
+    for reads in read_list:
+        logger.info('Counting reads in {}'.format(reads))
+        n_reads += count_fastq_sequences(reads, max_cpu=threads)
+    logger.info('Found {} reads to analyse'.format(n_reads))
 
     # probability of acceptance for subsampling
     if sample_rate is None or sample_rate == 1:
@@ -283,74 +285,71 @@ def analyze(k_size, enzyme, kmer_db, fastq, mean_insert, output=None, seed=None,
 
     logger.info('Beginning analysis...')
 
-    with tqdm.tqdm(desc="Progress", total=n_reads) as progress:
+    with tqdm.tqdm(desc="Progress (file 1)", total=n_reads) as progress:
 
         cov_obs = []
+        for n, reads in enumerate(read_list, 1):
 
-        # set up the generator over FastQ reads, with sub-sampling
-        fq_reader = next_read(fastq, site, k_size, sample_rate, progress)
+            progress.set_description('Progress (file {})'.format(n))
 
-        while True:
+            # set up the generator over FastQ reads, with sub-sampling
+            fq_reader = next_read(reads, site, k_size, sample_rate, progress)
 
-            # TODO we could probably take this try/catch outside the look
-            # TODO as we've more than one place where breaks can occur.
-            try:
-                seq, ix, _id, seq_len = next(fq_reader)
-            except StopIteration:
-                # # we need to manually close these progress bars if we don't want
-                # # nearby print statements to interfere
-                # # TODO doing this makes the with() statement sorta useless
-                # progress.close()
-                break
+            while True:
 
-            reads_evaluated += 1
-            if seq[0:site_size//2] == half_site:
-                starts_with_cutsite += 1
-            read_length += len(seq)
+                try:
+                    seq, ix, _id, seq_len = next(fq_reader)
+                except StopIteration:
+                    break
 
-            # if the read contains no junction, we might still use it
-            # as an example of a shotgun read (wgs)
-            if ix is None:
+                reads_evaluated += 1
+                if seq[0:site_size//2] == half_site:
+                    starts_with_cutsite += 1
+                read_length += len(seq)
 
-                # as there are so many non-junction reads, we need to subsample
-                if unif() > 0.1:
+                # if the read contains no junction, we might still use it
+                # as an example of a shotgun read (wgs)
+                if ix is None:
+
+                    # as there are so many non-junction reads, we need to subsample
+                    if unif() > 0.1:
+                        continue
+
+                    # try to find a randomly selected region which does not contain
+                    # ambiguous bases. Skip the read if we fail in a few attempts
+                    _attempts = 0
+                    while _attempts < 3:
+                        ix = randint(k_size, seq_len - (k_size + site_size)+1)
+                        # if no N within the subsequence, then accept it
+                        if 'N' not in seq[ix - k_size: ix + k_size + site_size]:
+                            break
+                        # otherwise keep trying
+                        _attempts += 1
+                    # too many tries occurred, abandon this sequence
+                    if _attempts >= 3:
+                        continue
+
+                    rtype = 'wgs'
+
+                # junction containing reads, categorised as hic for simplicity
+                else:
+
+                    # abandon this sequence if it contains an N
+                    if 'N' in seq[ix - k_size: ix + k_size + site_size]:
+                        read_length -= len(seq)
+                        reads_evaluated -= 1
+                        continue
+
+                    rtype = 'hic'
+
+                mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size, min_cov=1)
+
+                # avoid regions with pathologically high coverage
+                if mean_outer > max_coverage:
                     continue
 
-                # try to find a randomly selected region which does not contain
-                # ambiguous bases. Skip the read if we fail in a few attempts
-                _attempts = 0
-                while _attempts < 3:
-                    ix = randint(k_size, seq_len - (k_size + site_size)+1)
-                    # if no N within the subsequence, then accept it
-                    if 'N' not in seq[ix - k_size: ix + k_size + site_size]:
-                        break
-                    # otherwise keep trying
-                    _attempts += 1
-                # too many tries occurred, abandon this sequence
-                if _attempts >= 3:
-                    continue
-
-                rtype = 'wgs'
-
-            # junction containing reads, categorised as hic for simplicity
-            else:
-
-                # abandon this sequence if it contains an N
-                if 'N' in seq[ix - k_size: ix + k_size + site_size]:
-                    read_length -= len(seq)
-                    reads_evaluated -= 1
-                    continue
-
-                rtype = 'hic'
-
-            mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size, min_cov=1)
-
-            # avoid regions with pathologically high coverage
-            if mean_outer > max_coverage:
-                continue
-
-            # record this observation
-            cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
+                # record this observation
+                cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
 
     # lets do some tabular munging, making sure that our categories are explicit
     all_df = pandas.DataFrame(cov_obs)
