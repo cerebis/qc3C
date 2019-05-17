@@ -111,7 +111,8 @@ def count_fastq_sequences(file_name, max_cpu=1):
     return n
 
 
-def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated, starts_with_cutsite):
+def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
+                 starts_with_cutsite, failed_wgs, failed_jnc, failed_cov, max_coverage):
     """
     Print a report of analysis results.
 
@@ -122,7 +123,16 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
     :param read_length: the length of sequencing reads in bp
     :param reads_evaluated: the number of reads evaluated in the analysis
     :param starts_with_cutsite: the number of reads which began with a cut-site
+    :param failed_wgs: number of wgs reads abandoned from containing ambiguous sequence
+    :param failed_jnc: number of junction reads abandoned from containing ambiguous sequence
+    :param failed_cov: number of redas rejected due to excessive coverage
+    :param max_coverage: maximum acceptable coverage with parsing reads
     """
+
+    logger.info('Number of reads abandoned due to ambiguous sequence. wgs: {} junction: {}'
+                .format(failed_wgs, failed_jnc))
+    logger.info('Number of reads abandoned due to coverage > {}nt: {}'
+                .format(max_coverage, failed_cov))
 
     logger.info('Fraction of reads starting with a cut site: {:#.4g}'.format(starts_with_cutsite / reads_evaluated))
     logger.info('Expected fraction at 50% GC: {:#.4g}'.format(1 / np.power(4, site_size / 2)))
@@ -155,8 +165,8 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
             logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
 
-def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=None,
-            sample_rate=None, max_coverage=500, threads=1):
+def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
+            sample_rate=None, max_coverage=500, threads=1, save_cov=False):
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -166,11 +176,11 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
     :param kmer_db: the jellyfish kmer database
     :param read_list: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
-    :param output: write collected junction observations to file
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
     :param max_coverage: ignore kmers with coverage greater than this value
     :param threads: use additional threads for supported steps
+    :param save_cov: if True, write collected observations to file
     """
 
     def collect_coverage(seq, ix, site_size, k, min_cov=0):
@@ -234,10 +244,10 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
                 yield _seq, _ix, _id, seq_len
 
     # Determine the junction, treat as uppercase
-    junction = ligation_junction_seq(get_enzyme_instance(enzyme))
-    site = junction.junction.upper()
-    site_size = junction.junc_len
-
+    lig_info = ligation_junction_seq(get_enzyme_instance(enzyme))
+    junc_site = lig_info.junction
+    site_size = lig_info.junc_len
+    cut_site = lig_info.cut_site
     # TODO for flexible flanks could be handled if L/R flanks treated independently
     flank_size = (k_size - site_size) // 2
 
@@ -280,20 +290,28 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
 
     reads_evaluated = 0
     starts_with_cutsite = 0
-    read_length = 0
-    half_site = site[0:site_size//2]
+    cumulative_length = 0
+    failed_wgs = 0
+    failed_jnc = 0
+    failed_cov = 0
 
     logger.info('Beginning analysis...')
 
-    with tqdm.tqdm(desc="Progress (file 1)", total=n_reads) as progress:
+    if len(read_list) > 1:
+        initial_desc = 'Progress (file 1)'
+    else:
+        initial_desc = 'Progress'
+
+    with tqdm.tqdm(desc=initial_desc, total=n_reads) as progress:
 
         cov_obs = []
         for n, reads in enumerate(read_list, 1):
 
-            progress.set_description('Progress (file {})'.format(n))
+            if n > 1:
+                progress.set_description('Progress (file {})'.format(n))
 
             # set up the generator over FastQ reads, with sub-sampling
-            fq_reader = next_read(reads, site, k_size, sample_rate, progress)
+            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress)
 
             while True:
 
@@ -302,17 +320,19 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
                 except StopIteration:
                     break
 
-                reads_evaluated += 1
-                if seq[0:site_size//2] == half_site:
+                if seq.startswith(cut_site):
                     starts_with_cutsite += 1
-                read_length += len(seq)
 
                 # if the read contains no junction, we might still use it
                 # as an example of a shotgun read (wgs)
                 if ix is None:
 
+                    rtype = 'wgs'
+
                     # as there are so many non-junction reads, we need to subsample
                     if unif() > 0.1:
+                        reads_evaluated += 1
+                        cumulative_length += seq_len
                         continue
 
                     # try to find a randomly selected region which does not contain
@@ -325,28 +345,31 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
                             break
                         # otherwise keep trying
                         _attempts += 1
+
                     # too many tries occurred, abandon this sequence
                     if _attempts >= 3:
+                        failed_wgs += 1
                         continue
-
-                    rtype = 'wgs'
 
                 # junction containing reads, categorised as hic for simplicity
                 else:
 
+                    rtype = 'hic'
+
                     # abandon this sequence if it contains an N
                     if 'N' in seq[ix - k_size: ix + k_size + site_size]:
-                        read_length -= len(seq)
-                        reads_evaluated -= 1
+                        failed_jnc += 1
                         continue
-
-                    rtype = 'hic'
 
                 mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size, min_cov=1)
 
                 # avoid regions with pathologically high coverage
                 if mean_outer > max_coverage:
+                    failed_cov += 1
                     continue
+
+                reads_evaluated += 1
+                cumulative_length += seq_len
 
                 # record this observation
                 cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
@@ -367,13 +390,13 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
     n_sampled = len(all_df)
     if n_sampled == 0:
         raise RuntimeError('The sample set was empty. '
-                           'Please check that the kmer database and fastq file are a correct match and '
+                           'Please check that the kmer database and read-set are correctly matched and '
                            'that --max-n is not set too small')
 
     all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
 
     agg_rtype = all_df.groupby('read_type').size()
-    logger.info('Collected observation breakdown. WGS: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
+    logger.info('Collected observation breakdown. wgs: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
     if agg_rtype.wgs == 0:
         raise RuntimeError('No wgs examples were contained in the collected sample. '
                            'Consider increasing --max-n')
@@ -396,14 +419,14 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, output=None, seed=N
     all_df.sort_values('ratio', inplace=True)
     all_df.reset_index(inplace=True, drop=True)
 
-    print_report(hic_df, all_df, site_size, mean_insert, read_length, reads_evaluated, starts_with_cutsite)
+    print_report(hic_df, all_df, site_size, mean_insert, cumulative_length,
+                 reads_evaluated, starts_with_cutsite,
+                 failed_wgs, failed_jnc, failed_cov, max_coverage)
 
     # combine them together
-    if output is not None:
-        if not output.endswith('.gz'):
-            output = '{}.gz'.format(output)
-        logger.info('Writing observations to gzipped csv file: {}'.format(output))
-        all_df = wgs_df.append(hic_df)
-        all_df.sort_values('ratio', inplace=True)
-        all_df.reset_index(inplace=True, drop=True)
-        all_df.to_csv(gzip.open(output, 'wt'), sep='\t')
+    if save_cov is not None:
+        logger.info('Writing observations to gzipped tsv file: {}'.format('cov_dat.tsv.gz'))
+        # all_df = wgs_df.append(hic_df)
+        # all_df.sort_values('ratio', inplace=True)
+        # all_df.reset_index(inplace=True, drop=True)
+        all_df.to_csv(gzip.open('cov_dat.tsv.gz', 'wt'), sep='\t')
