@@ -7,7 +7,7 @@ from Bio.Restriction import Restriction
 from qc3C.exceptions import *
 
 # immutable type used in storing information about enzymatic byproducts in proximity ligation
-LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'end_match', 'junc_len', 'site_len'))
+LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'cut_site', 'junc_len', 'site_len'))
 
 
 def leven_ratio(a: str, b: str):
@@ -87,4 +87,4 @@ def ligation_junction_seq(enz, spacer=''):
         end5, end3 = enz.site[:a], enz.site[-a:]
         site = site[:-a]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
-    return LigationInfo(str(enz), junc, site, len(junc), len(site))
+    return LigationInfo(str(enz), junc.upper(), site.upper(), len(junc), len(site))

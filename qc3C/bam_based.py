@@ -372,7 +372,7 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                     # we can still test for the cut-site
                     seq = get_forward_strand(r)
                     for lig in ligation_variants:
-                        if seq.endswith(lig.end_match):
+                        if seq.endswith(lig.cut_site):
                             report.enzyme[lig.enzyme_name].cs_full += 1
                             break
                     continue
@@ -388,7 +388,7 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                 # check that a cut-site exists on the end
                 found_lig = False
                 for lig in ligation_variants:
-                    if aln_seq.endswith(lig.end_match):
+                    if aln_seq.endswith(lig.cut_site):
                         found_lig = True
                         report.enzyme[lig.enzyme_name].cs_term += 1
 
@@ -431,8 +431,8 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                 .format(*long_bins, w=field_width))
     logger.info('Number of cis-mapping pairs:   {:>{w[0]}d},   {:>{w[1]}d},   {:>{w[2]}d}'
                 .format(*long_counts, w=field_width))
-    prop = long_counts.astype(np.float) / all_cis_count
-    logger.info('Relative proportion:           {:#>{w[0]}.4g},   {:#>{w[1]}.4g},   {:#>{w[2]}.4g}'
-                .format(*prop, w=field_width))
+    frac = long_counts.astype(np.float) / all_cis_count
+    logger.info('Relative fractiom:           {:#.4g},   {:#.4g},   {:#.4g}'
+                .format(*frac, w=field_width))
 
     print_report(report)
