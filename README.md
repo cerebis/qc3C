@@ -11,13 +11,13 @@ In either case, qc3C searches for evidence of proximity ligations to infer wheth
 Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 
 **BAM mode**
-```bash
-> qc3C bam -e Sau3AI -e MluCI hic_to_ref.bam
+```$bash
+> qc3C bam --mean-insert 300 -e Sau3AI --enzyme MluCI --bam hic_to_ref.bam
 
 ```
 **Kmer mode**
-```bash
-> qc3C kmer -e Sau3AI --mean-insert 500 24 run.fq.gz 24mer.jf
+```$bash
+> qc3C kmer --mean-insert 500 -enzyme Sau3AI --kmer-size 24 --reads run.fq.gz --lib 24mer.jf
 ```
 
 
@@ -40,52 +40,54 @@ commands:
 ```
 
 ```$bash
-usage: qc3C bam [-h] [--sep SEP] -e NEB_NAME [-t N] BAM
+usage: qc3C bam [-h] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
+                MEAN_INSERT -b BAM
 
 Alignment-based analysis.
 
-positional arguments:
-  BAM                   Input name-sorted bam file of Hi-C reads mapped to 
-                        references
-
 optional arguments:
   -h, --help            show this help message and exit
-  --sep SEP             Delimiter to use in report table
-  -e NEB_NAME, --enzyme NEB_NAME
-                        Case-sensitive NEB enzyme name. Use multiple times for
-                        multiple enzymes
-  -t N, --threads N     Number of threads
-```
-
-```$bash
-usage: qc3C kmer [-h] [--sep SEP] -e NEB_NAME [-s SEED] [-n MAX_READS] [-a]
-                 [-m MEAN_INSERT] [-x MAX_COVERAGE] [-N POOL_SIZE]
-                 KMER_SIZE FASTQ KMER_DB
-
-Kmer-based analysis.
-
-positional arguments:
-  KMER_SIZE             Kmer size used in database
-  FASTQ                 FastQ file used in making the kmer database
-  KMER_DB               Jellyfish kmer database
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --sep SEP             Delimiter to use in report table
-  -e NEB_NAME, --enzyme NEB_NAME
-                        Case-sensitive NEB enzyme name. Use multiple times for
-                        multiple enzymes
+  -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
+                        Sample only a proportion of all read-pairs [None]
   -s SEED, --seed SEED  Random seed used in sampling the read-set
-  -n MAX_READS, --max-reads MAX_READS
-                        Stop after collecting N sample reads
-  -a, --accept-all      Override acceptance rate and accept all useable reads
+  -t N, --threads N     Number of threads
+  -e NEB_NAME, --enzyme NEB_NAME
+                        One or more case-sensitive NEB enzyme names (Use
+                        multiple times for multiple files enzymes)
   -m MEAN_INSERT, --mean-insert MEAN_INSERT
                         Mean fragment length to use in estimating the
                         unobserved junction rate
-  -x MAX_COVERAGE, --max-coverage MAX_COVERAGE
-                        Ignore regions with more than this coverage
-  -N POOL_SIZE, --pool-size POOL_SIZE
-                        The total number of reads which are being provided for
-                        consideration
+  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to
+                        references
+```
 
+```$bash
+usage: qc3C kmer [-h] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
+                 MEAN_INSERT [--save-cov] [-x MAX_COVERAGE] -k KMER_SIZE -l
+                 KMER_LIB -r FASTQ_FILE
+
+Kmer-based analysis.
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
+                        Sample only a proportion of all read-pairs [None]
+  -s SEED, --seed SEED  Random seed used in sampling the read-set
+  -t N, --threads N     Number of threads
+  -e NEB_NAME, --enzyme NEB_NAME
+                        One or more case-sensitive NEB enzyme names (Use
+                        multiple times for multiple files enzymes)
+  -m MEAN_INSERT, --mean-insert MEAN_INSERT
+                        Mean fragment length to use in estimating the
+                        unobserved junction rate
+  --save-cov            Save the collected coverage information to file
+  -x MAX_COVERAGE, --max-coverage MAX_COVERAGE
+                        Ignore regions with more than this coverage [500]
+  -k KMER_SIZE, --kmer_size KMER_SIZE
+                        Kmer size used in database
+  -l KMER_LIB, --lib KMER_LIB
+                        Jellyfish kmer database
+  -r FASTQ_FILE, --reads FASTQ_FILE
+                        FastQ format reads used in making the kmer database
+                        (Use multiple times for multiple files)
 ```

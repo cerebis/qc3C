@@ -51,7 +51,7 @@ def main():
                           help='Save the collected coverage information to file')
     cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int,
                           help='Ignore regions with more than this coverage [500]')
-    cmd_kmer.add_argument('-k','--kmer_size', type=int, required=True,
+    cmd_kmer.add_argument('-k','--kmer-size', type=int, required=True,
                           help='Kmer size used in database')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
                           help='Jellyfish kmer database')
