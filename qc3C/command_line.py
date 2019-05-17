@@ -2,7 +2,7 @@ import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
 
-__version__ = '0.2'
+__version__ = '0.2.1'
 __log_name__ = 'qc3C.log'
 
 

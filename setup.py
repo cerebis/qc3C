@@ -7,7 +7,7 @@ setuptools.setup(
     name='qc3C',
     description='Hi-C quality control analysis',
     long_description=long_description,
-    version='0.2',
+    version='0.2.1',
     author='Matthew Z DeMaere',
     author_email='matt.demaere@gmail.com',
     platforms='Linux-86_x64',
