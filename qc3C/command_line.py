@@ -47,8 +47,10 @@ def main():
     """
     CLI for Kmer based analysis
     """
+    cmd_kmer.add_argument('--save-cov', default=False, action='store_true',
+                          help='Save the collected coverage information to file')
     cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int,
-                          help='Ignore regions with more than this coverage')
+                          help='Ignore regions with more than this coverage [500]')
     cmd_kmer.add_argument('-k','--kmer_size', type=int, required=True,
                           help='Kmer size used in database')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
@@ -117,7 +119,7 @@ def main():
 
             kmer.analyze(args.kmer_size, args.enzyme[0], args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
-                         threads=args.threads)
+                         threads=args.threads, save_cov=args.save_cov)
 
     except Exception as ex:
         logger.exception(ex)
