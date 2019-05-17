@@ -4,10 +4,15 @@ import qc3C.kmer_based as kmer
 
 __version__ = '0.2.1'
 __log_name__ = 'qc3C.log'
+__copyright__ = """Copyright (C) 2019 Matthew Z DeMaere
+This is free software.  You may redistribute copies of it under the terms of
+the GNU Affero General Public License <https://www.gnu.org/licenses/agpl.html>.
+There is NO WARRANTY, to the extent permitted by law.
+"""
 
 
 def mk_version():
-    return 'qc3C v{}'.format(__version__)
+    return 'qc3C {}\n{}'.format(__version__, __copyright__)
 
 
 def main():
@@ -18,6 +23,7 @@ def main():
     Shared CLI arguments
     """
     global_parser = argparse.ArgumentParser(add_help=False)
+    global_parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
     global_parser.add_argument('-p', '--sample-rate', default=None, type=float,
                                help='Sample only a proportion of all read-pairs [None]')
     global_parser.add_argument('-s', '--seed', type=int,
@@ -30,11 +36,10 @@ def main():
                                help='Mean fragment length to use in estimating the unobserved junction rate')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
-    parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
     subparsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
                                        help='choose an analysis stage for further options')
-    subparsers.required = True
+    subparsers.required = False
     cmd_bam = subparsers.add_parser('bam', parents=[global_parser], description='Alignment-based analysis.')
     cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser], description='Kmer-based analysis.')
 
@@ -63,6 +68,10 @@ def main():
 
     if args.version:
         print(mk_version())
+        sys.exit(0)
+
+    if args.command is None:
+        parser.print_help()
         sys.exit(0)
 
     logging.captureWarnings(True)
