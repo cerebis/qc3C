@@ -5,6 +5,18 @@ import os
 logger = logging.getLogger(__name__)
 
 
+def warn_if(_test: bool):
+    """
+    Conditional help for logging warnings.
+    :param _test: if true, level is that of WARNING
+    :return: return WARNING if true, otherwise INFO
+    """
+    if _test:
+        return logging.WARNING
+    else:
+        return logging.INFO
+
+
 def test_for_exe(prog_name):
     """
     Test whether a program exists on the system. This can be either a full path

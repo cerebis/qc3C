@@ -7,7 +7,7 @@ setuptools.setup(
     name='qc3C',
     description='Hi-C quality control analysis',
     long_description=long_description,
-    version='0.2.1',
+    version='0.2.3',
     author='Matthew Z DeMaere',
     author_email='matt.demaere@gmail.com',
     platforms='Linux-86_x64',
@@ -16,13 +16,12 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
 
     install_requires=[
+        'biopython',
         'leven',
         'numpy',
         'pandas',
         'pysam',
-        'tqdm',
-        'biopython',
-        'recordclass',
+        'tqdm'
     ],
 
     classifiers=[

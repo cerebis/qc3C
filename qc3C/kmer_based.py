@@ -111,16 +111,16 @@ def count_fastq_sequences(file_name, max_cpu=1):
     return n
 
 
-def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
+def print_report(hic, all, lig_info, mean_insert, cumulative_length, reads_evaluated,
                  starts_with_cutsite, failed_wgs, failed_jnc, failed_cov, max_coverage):
     """
     Print a report of analysis results.
 
     :param hic: the table of hi-c observations
     :param all:  the table of all (wgs + hi-c) observations
-    :param site_size: the length of the junction in bp
+    :param lig_info: details of possible ligations in experiment
     :param mean_insert: the mean insert size used in library generation
-    :param read_length: the length of sequencing reads in bp
+    :param cumulative_length: the cumulative length of analyzed sequencing reads in bp
     :param reads_evaluated: the number of reads evaluated in the analysis
     :param starts_with_cutsite: the number of reads which began with a cut-site
     :param failed_wgs: number of wgs reads abandoned from containing ambiguous sequence
@@ -129,13 +129,13 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
     :param max_coverage: maximum acceptable coverage with parsing reads
     """
 
-    logger.info('Number of reads abandoned due to ambiguous sequence. wgs: {} junction: {}'
-                .format(failed_wgs, failed_jnc))
-    logger.info('Number of reads abandoned due to coverage > {}nt: {}'
-                .format(max_coverage, failed_cov))
+    logger.info('Number of reads abandoned due to ambiguous sequence. wgs: {:,} frac: {:#.4g}, junction: {:,} frac: {:#.4g}'
+                .format(failed_wgs, failed_jnc, failed_wgs / reads_evaluated, failed_jnc / reads_evaluated))
+    logger.info('Number of reads abandoned due to coverage > {}: {:,} frac: {:#.4g}'
+                .format(max_coverage, failed_cov, failed_cov / reads_evaluated))
 
     logger.info('Fraction of reads starting with a cut site: {:#.4g}'.format(starts_with_cutsite / reads_evaluated))
-    logger.info('Expected fraction at 50% GC: {:#.4g}'.format(1 / np.power(4, site_size / 2)))
+    logger.info('Expected fraction by random chance 50% GC: {:#.4g}'.format(1 / 4 ** lig_info.site_len))
     logger.info('Fraction of reads containing the junction sequence: {:#.4g}'.format(len(hic) / reads_evaluated))
 
     cur_pval = 0
@@ -154,7 +154,7 @@ def print_report(hic, all, site_size, mean_insert, read_length, reads_evaluated,
     logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
     if mean_insert is not None:
-        unobserved_fraction = (mean_insert - (read_length / reads_evaluated) * 2) / mean_insert
+        unobserved_fraction = (mean_insert - (cumulative_length / reads_evaluated) * 2) / mean_insert
         if unobserved_fraction < 0:
             logger.warning('Estimated unobserved fraction < 0, therefore adjustment will not be applied')
             logger.warning('Check that the supplied mean insert length is not too short')
@@ -246,14 +246,14 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     # Determine the junction, treat as uppercase
     lig_info = ligation_junction_seq(get_enzyme_instance(enzyme))
     junc_site = lig_info.junction
-    site_size = lig_info.junc_len
+    junc_size = lig_info.junc_len
     cut_site = lig_info.cut_site
     # TODO for flexible flanks could be handled if L/R flanks treated independently
-    flank_size = (k_size - site_size) // 2
+    flank_size = (k_size - junc_size) // 2
 
     # some sanity checks.
-    assert k_size - site_size > 0, 'Kmer size must be larger the the junction size'
-    assert (k_size - site_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
+    assert k_size - junc_size > 0, 'Kmer size must be larger the the junction size'
+    assert (k_size - junc_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
 
     # for efficiency, disable sampling if rate is 1
     if sample_rate == 1:
@@ -265,7 +265,7 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     query_jf = dna_jellyfish.QueryMerFile(kmer_db)
 
     OUTER_IX = np.array([True] * (flank_size+2) +
-                        [False] * (site_size*2 + 1 - 4) +
+                        [False] * (junc_size*2 + 1 - 4) +
                         [True] * (flank_size+2), dtype=np.bool)
     INNER_IX = ~ OUTER_IX
 
@@ -274,7 +274,7 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     for reads in read_list:
         logger.info('Counting reads in {}'.format(reads))
         n_reads += count_fastq_sequences(reads, max_cpu=threads)
-    logger.info('Found {} reads to analyse'.format(n_reads))
+    logger.info('Found {:,} reads to analyse'.format(n_reads))
 
     # probability of acceptance for subsampling
     if sample_rate is None or sample_rate == 1:
@@ -339,9 +339,9 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
                     # ambiguous bases. Skip the read if we fail in a few attempts
                     _attempts = 0
                     while _attempts < 3:
-                        ix = randint(k_size, seq_len - (k_size + site_size)+1)
+                        ix = randint(k_size, seq_len - (k_size + junc_size)+1)
                         # if no N within the subsequence, then accept it
-                        if 'N' not in seq[ix - k_size: ix + k_size + site_size]:
+                        if 'N' not in seq[ix - k_size: ix + k_size + junc_size]:
                             break
                         # otherwise keep trying
                         _attempts += 1
@@ -357,11 +357,11 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
                     rtype = 'hic'
 
                     # abandon this sequence if it contains an N
-                    if 'N' in seq[ix - k_size: ix + k_size + site_size]:
+                    if 'N' in seq[ix - k_size: ix + k_size + junc_size]:
                         failed_jnc += 1
                         continue
 
-                mean_inner, mean_outer = collect_coverage(seq, ix, site_size, k_size, min_cov=1)
+                mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size, min_cov=1)
 
                 # avoid regions with pathologically high coverage
                 if mean_outer > max_coverage:
@@ -396,7 +396,7 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
 
     agg_rtype = all_df.groupby('read_type').size()
-    logger.info('Collected observation breakdown. wgs: {} junction: {}'.format(agg_rtype.wgs, agg_rtype.hic))
+    logger.info('Collected observation breakdown. wgs: {:,} junction: {:,}'.format(agg_rtype.wgs, agg_rtype.hic))
     if agg_rtype.wgs == 0:
         raise RuntimeError('No wgs examples were contained in the collected sample. '
                            'Consider increasing --max-n')
@@ -419,14 +419,11 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     all_df.sort_values('ratio', inplace=True)
     all_df.reset_index(inplace=True, drop=True)
 
-    print_report(hic_df, all_df, site_size, mean_insert, cumulative_length,
+    print_report(hic_df, all_df, lig_info, mean_insert, cumulative_length,
                  reads_evaluated, starts_with_cutsite,
                  failed_wgs, failed_jnc, failed_cov, max_coverage)
 
     # combine them together
-    if save_cov is not None:
+    if save_cov:
         logger.info('Writing observations to gzipped tsv file: {}'.format('cov_dat.tsv.gz'))
-        # all_df = wgs_df.append(hic_df)
-        # all_df.sort_values('ratio', inplace=True)
-        # all_df.reset_index(inplace=True, drop=True)
         all_df.to_csv(gzip.open('cov_dat.tsv.gz', 'wt'), sep='\t')

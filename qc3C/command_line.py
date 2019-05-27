@@ -2,7 +2,7 @@ import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
 
-__version__ = '0.2.1'
+__version__ = '0.2.3'
 __log_name__ = 'qc3C.log'
 __copyright__ = """Copyright (C) 2019 Matthew Z DeMaere
 This is free software.  You may redistribute copies of it under the terms of
