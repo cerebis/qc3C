@@ -11,8 +11,11 @@ There is NO WARRANTY, to the extent permitted by law.
 """
 
 
-def mk_version():
-    return 'qc3C {}\n{}'.format(__version__, __copyright__)
+def mk_version(full=True):
+    if full:
+        return 'qc3C {}\n{}'.format(__version__, __copyright__)
+    else:
+        return 'qc3C {}'.format(__version__)
 
 
 def main():
@@ -99,7 +102,7 @@ def main():
     root.addHandler(fh)
 
     # Add some environmental details
-    logger.debug(mk_version())
+    logger.debug(mk_version(False))
     logger.debug(sys.version.replace('\n', ' '))
     logger.debug('Command line: {}'.format(' '.join(sys.argv)))
 
