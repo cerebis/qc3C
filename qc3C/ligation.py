@@ -7,7 +7,8 @@ from Bio.Restriction import Restriction
 from qc3C.exceptions import *
 
 # immutable type used in storing information about enzymatic byproducts in proximity ligation
-LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'cut_site', 'junc_len', 'site_len'))
+LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'cut_site', 'vestigial',
+                                            'junc_len', 'site_len', 'vest_len'))
 
 
 def leven_ratio(a: str, b: str):
@@ -75,6 +76,18 @@ def ligation_junction_seq(enz, spacer=''):
     :params spacer: optional string with which to separate site elements (debugging)
     """
     assert not enz.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
+    assert not enz.is_blunt(), 'enzyme produces blunt ends'
+
+    def vestigial_site():
+        """
+        Determine the part of the cut-site that will remain when a ligation junction is
+        created. This can be the entire cut-site or a smaller portion, beginning from
+        the left.
+        """
+        i = 0
+        while i < enz.size and enz.site[i] == junc[i]:
+            i += 1
+        return str(enz.site[:i])
 
     end5, end3 = '', ''
     site = str(enz.site)
@@ -85,6 +98,7 @@ def ligation_junction_seq(enz, spacer=''):
         if a > enz.size // 2:
             a = enz.size - a
         end5, end3 = enz.site[:a], enz.site[-a:]
-        site = site[:-a]
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
-    return LigationInfo(str(enz), junc.upper(), site.upper(), len(junc), len(site))
+    vest = vestigial_site()
+    return LigationInfo(str(enz), junc.upper(), enz.site.upper(), vest.upper(),
+                        len(junc), enz.size, len(vest))

@@ -273,15 +273,16 @@ class PairFilter(Counter):
             return super().count(k)
 
     def cis_count(self):
-        assert self.no_trans, 'no_trans must be True to count the number of cis pairs'
         return self.counts['all'] - self.counts['trans']
 
     def accept(self, r1, r2):
         _accept = True
         self.counts['all'] += 1
-        if self.no_trans and r1.reference_id != r2.reference_id:
+        if r1.reference_id != r2.reference_id:
+            # always count trans, even if not emitted
             self.counts['trans'] += 1
-            _accept = False
+            if self.no_trans:
+                _accept = False
         if _accept:
             self.counts['accepted'] += 1
         return _accept
@@ -311,6 +312,7 @@ class read_pairs(object):
 
         self.random_state = random_state
         self.show_progress = show_progress
+        self.progress = None
         self.is_ipynb = is_ipynb
 
         # applying sample_rate to reads means that the pass rate of pairs has an upper bound of sample_rate ** 2.
@@ -325,7 +327,6 @@ class read_pairs(object):
                                       no_refterm, np.array([li for li in self.bam.lengths]), random_state)
         self.pair_filter = PairFilter(no_trans=no_trans)
 
-    def __enter__(self):
         self.bam_iter = self.bam.fetch(until_eof=True)
         if not self.show_progress:
             self.progress = None
@@ -333,12 +334,20 @@ class read_pairs(object):
             self.progress = tqdm.tqdm_notebook(total=self.n_reads)
         else:
             self.progress = tqdm.tqdm(total=self.n_reads)
+
+    def __enter__(self):
         return self
 
-    def __exit__(self, *a):
+    def close(self):
         if self.bam is not None:
             self.bam.close()
+            self.bam = None
+        if self.progress is not None:
             self.progress.close()
+            self.progress = None
+
+    def __exit__(self, *a):
+        self.close()
 
     def __iter__(self):
         pb_update = None if self.progress is None else self.progress.update
@@ -368,7 +377,20 @@ class read_pairs(object):
                 pass_a = pass_b
 
         except StopIteration:
-            return
+            self.close()
+
+
+def junction_match_length(seq, read, lig_info):
+    if read.is_reverse:
+        i = read.query_length - read.query_alignment_start
+    else:
+        i = read.query_alignment_end
+
+    j = lig_info.vest_len
+    while i < len(seq) and j < lig_info.junc_len and seq[i] == lig_info.junction[j]:
+        i += 1
+        j += 1
+    return j - lig_info.vest_len
 
 
 def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_mapq=60, threads=1):
@@ -388,7 +410,7 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
 
     with read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
                     min_mapq=min_mapq, min_match=1, min_reflen=500,
-                    no_trans=True, no_secondary=True, no_supplementary=True, no_refterm=True,
+                    no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
                     threads=threads, count_reads=True, show_progress=True) as pair_parser:
 
         cumulative_length = 0
@@ -396,8 +418,9 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
         short_count = 0
         long_counts = np.zeros(3, dtype=np.int)
         long_bins = (1000, 5000, 10000)
-        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0, 'small_flank': 0}
-        enzyme_counts = {enz: {'cs_full': 0, 'cs_term': 0, 'read_thru': 0, 'is_split': 0} for enz in enzymes}
+        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0}
+        enzyme_counts = {enz: {'cs_full': 0, 'cs_term': 0, 'read_thru': 0,
+                               'is_split': 0, 'partial_readthru': 0} for enz in enzymes}
 
         # begin with user supplied median estimate
         short_median_est = mean_insert
@@ -406,34 +429,37 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
 
         for r1, r2 in pair_parser:
 
-            d = pair_separation(r1, r2)
+            # for cis-pairs, determine their separation
+            if r1.reference_id == r2.reference_id:
 
-            # cis-mapping, well mapped pairs
-            if d is not None:
+                d = pair_separation(r1, r2)
 
-                # track the number of pairs observed for the requested separation distances
-                if d >= long_bins[2]:
-                    long_counts[2] += 1
-                    long_counts[1] += 1
-                    long_counts[0] += 1
-                elif d >= long_bins[1]:
-                    long_counts[1] += 1
-                    long_counts[0] += 1
-                elif d >= long_bins[0]:
-                    long_counts[0] += 1
+                # cis-mapping, well mapped pairs
+                if d is not None:
 
-                # keep a count of those pairs which are within the "WGS" region
-                elif 50 < d < 1000:
-                    short_sum += d
-                    short_count += 1
+                    # track the number of pairs observed for the requested separation distances
+                    if d >= long_bins[2]:
+                        long_counts[2] += 1
+                        long_counts[1] += 1
+                        long_counts[0] += 1
+                    elif d >= long_bins[1]:
+                        long_counts[1] += 1
+                        long_counts[0] += 1
+                    elif d >= long_bins[0]:
+                        long_counts[0] += 1
 
-                    # frugal median estimator
-                    if short_median_est > d:
-                        short_median_est -= 1
-                    elif short_median_est < d:
-                        short_median_est += 1
+                    # keep a count of those pairs which are within the "WGS" region
+                    elif 50 < d < 1000:
+                        short_sum += d
+                        short_count += 1
 
-            # for each read in the pair, extract some QC statistics
+                        # frugal median estimator
+                        if short_median_est > d:
+                            short_median_est -= 1
+                        elif short_median_est < d:
+                            short_median_est += 1
+
+            # extract some QC statistics from the reads in both cis and trans pairs,
             for ri in [r1, r2]:
 
                 rlen = ri.query_length
@@ -442,20 +468,23 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                 pair_counts['total'] += 1
                 cumulative_length += rlen
 
-                # extra the aligned sequence as 5'->3'
-                seq = ri.seq
-                aln_seq = seq[ri.query_alignment_start: ri.query_alignment_end]
+                # always consider sequences 5'->3'
                 if ri.is_reverse:
-                    aln_seq = revcomp(aln_seq)
+                    seq = revcomp(ri.seq)
+                    aln_seq = seq[ri.query_length - ri.query_alignment_end: ri.query_length - ri.query_alignment_start]
+                else:
+                    seq = ri.seq
+                    aln_seq = seq[ri.query_alignment_start: ri.query_alignment_end]
 
-                # has the read fully-aligned
+                # for fully-aligned reads
                 if rlen == ri.query_alignment_length:
+
                     pair_counts['full_align'] += 1
 
                     # check for cut-site
                     _no_site = True
                     for enz, lig_info in ligation_variants.items():
-                        if seq.endswith(lig_info.cut_site):
+                        if seq.endswith(lig_info.vestigial):
                             _no_site = False
                             enzyme_counts[enz]['cs_full'] += 1
                             enzyme_counts[enz]['cs_term'] += 1
@@ -466,37 +495,33 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
 
                 # for reads terminating early, we can check for the junction duplication
                 else:
+
                     pair_counts['early_term'] += 1
 
                     # check for cut-site and potentially the junction
                     _no_site = True
                     for enz, lig_info in ligation_variants.items():
 
-                        if aln_seq.endswith(lig_info.cut_site):
+                        max_match = lig_info.junc_len - lig_info.vest_len
+
+                        if aln_seq.endswith(lig_info.vestigial):
                             _no_site = False
+
                             enzyme_counts[enz]['cs_term'] += 1
 
+                            # look for partial junctions, depending on how much
+                            # flanking sequence a read has available
                             if ri.is_reverse:
-                                # flank is to the left
-                                _start = ri.query_alignment_start + lig_info.site_len - lig_info.junc_len
-                                if _start < 0:
-                                    pair_counts['small_flank'] += 1
-                                    continue
-                                # just the suspected junction seq
-                                jnc_seq = revcomp(ri.seq[_start: _start+lig_info.junc_len])
+                                spare = ri.query_alignment_start
                             else:
-                                # flank is to the right
-                                _start = ri.query_alignment_end - lig_info.site_len
-                                if _start + lig_info.junc_len > ri.query_length:
-                                    pair_counts['small_flank'] += 1
-                                    continue
+                                spare = ri.query_length - ri.query_alignment_end
+                            m = junction_match_length(seq, ri, lig_info)
+                            if (m < max_match and m == spare) or m == max_match:
+                                enzyme_counts[enz]['partial_readthru'] += 1
 
-                                jnc_seq = ri.seq[_start: _start + lig_info.junc_len]
-
-                            if jnc_seq == lig_info.junction:
+                            # for full matches, keep a separate tally
+                            if m == max_match:
                                 enzyme_counts[enz]['read_thru'] += 1
-                                # see if the remainder might have been aligned
-                                # TODO this doesn't actually check -- if an aligner is doing something unlike BWA MEM
                                 if ri.has_tag('SA'):
                                     enzyme_counts[enz]['is_split'] += 1
 
@@ -558,7 +583,7 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                     .format(pair_counts['early_term'],
                             pair_counts['early_term'] / pair_counts['total']*100))
         # TODO this can probably be dropped.
-        logger.info('Number of paired reads not ending in a cut-site: {:,} ({:#.2f}% of paired)'
+        logger.info('Number of paired reads not ending in cut-site remnant: {:,} ({:#.2f}% of paired)'
                     .format(pair_counts['no_site'],
                             pair_counts['no_site'] / pair_counts['total']*100))
 
@@ -589,8 +614,8 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
             unobs_frac[_tag] = (_insert_len - mean_read_len * 2) / _insert_len
             if unobs_frac[_tag] < 0:
                 unobs_frac[_tag] = 0
-                logger.warning('For {} insert length of {:.0f}nt, estimation of the unobserved fraction is invalid (<0). '
-                               'Assuming an unobserved fraction: {:#.4g}'
+                logger.warning('For {} insert length of {:.0f}nt, estimation of the unobserved fraction '
+                               'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
                                .format(_tag,
                                        _insert_len,
                                        unobs_frac[_tag]))
@@ -604,12 +629,17 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
         for enz, counts in enzyme_counts.items():
             logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.2f}%'
                         .format(enz,
-                                1 / 4 ** ligation_variants[enz].site_len * 100))
-            logger.info('For {}, number of paired reads whose alignment ends at cut-site: {:,} ({:#.2f}%)'
+                                1 / 4 ** ligation_variants[enz].vest_len * 100))
+            logger.info('For {}, cut-site {} has remnant {}'
+                        .format(enz,
+                                ligation_variants[enz].cut_site,
+                                ligation_variants[enz].vestigial))
+            logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.2f}%)'
                         .format(enz,
                                 counts['cs_term'],
                                 counts['cs_term'] / pair_counts['total']*100))
-            logger.info('For {}, number of paired reads that fully aligned and end with cut-site: {:,} ({:#.2f}%)'
+
+            logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.2f}%)'
                         .format(enz,
                                 counts['cs_full'],
                                 counts['cs_full'] / pair_counts['total']*100))
@@ -619,6 +649,11 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                         .format(enz,
                                 delta_cs,
                                 delta_cs / pair_counts['total']*100))
+
+            logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.2f}%)'
+                        .format(enz,
+                                counts['partial_readthru'],
+                                counts['partial_readthru'] / pair_counts['total']*100))
 
             p_obs = counts['read_thru'] / pair_counts['total']
             logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.2f}%)'
@@ -635,10 +670,6 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                         .format(enz,
                                 (p_obs + p_obs * unobs_frac['observed']) * 100,
                                 (p_ub + p_ub * unobs_frac['observed']) * 100))
-
-        logger.info('Number of paired reads with insufficient flank to test for junction: {:,} ({:#.2f}%)'
-                    .format(pair_counts['small_flank'],
-                            pair_counts['small_flank'] / pair_counts['total']*100))
 
         # long-range bin counts, with formatting to align fields
         field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
