@@ -3,73 +3,23 @@ import multiprocessing
 import numpy as np
 import os
 import pysam
-import re
 import subprocess
 import tqdm
-
+from typing import Optional
 from abc import ABC
 
 from qc3C.exceptions import NameSortingException
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
 from qc3C.utils import init_random_state, warn_if
 
 logger = logging.getLogger(__name__)
 
-# Mapping of cigar characters to code values
-CODE2CIGAR = dict((y, x) for x, y in enumerate("MIDNSHP=X"))
-
-# Pattern that finds each unit of a cigar i.e. 10M or 9H
-CIGAR_ANY = re.compile(r"(\d+)([MIDNSHP=X])")
-
-
-def cigar_to_tuple(cigar):
-    """
-    Convert a CIGAR string into code values
-    :param cigar:
-    :return:
-    """
-    return [(CODE2CIGAR[t[1]], int(t[0])) for t in CIGAR_ANY.findall(cigar)]
-
-# TODO this method need work if it is to be used.
-#  issues: - all SA tags should be parsed, not just returning on the first
-#          - does not explicitly return a value in all cases, if reaching end
-#
-# def parse_secondary_alignment_tag(r):
-#     """
-#     Extract the secondary alignment tag (SA) information.
-#     :param r: the read to inspect
-#     :return: dictionary of fields extracted from the SA tag, or None if no SA tag exists
-#     """
-#     if not r.has_tag('SA'):
-#         return None
-#
-#     _tag = r.get_tag('SA')
-#     for aln_i in _tag.split(';'):
-#         if not aln_i:
-#             continue
-#         ti = aln_i.split(',')
-#         pos = int(ti[1]) - 1
-#         is_rev = {'-': True, '+': False}[ti[2]]
-#         cigtup = cigar_to_tuple(ti[3])
-#         alen = sum([num for op, num in cigtup if op == 0])
-#         tot = sum([num for op, num in cigtup])
-#
-#         return {'ref': ti[0],
-#                 'pos': pos,
-#                 'is_reverse': is_rev,
-#                 'cigar': ti[3],
-#                 'cigartuple': cigtup,
-#                 'mapq': int(ti[4]),
-#                 'nm': int(ti[5]),
-#                 'alen': alen,
-#                 'total': tot}
-
-
+# translation table used for complementation
 COMPLEMENT_TABLE = str.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
                                  'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
 
 
-def revcomp(seq):
+def revcomp(seq: str) -> str:
     """
     Reverse complement a string representation of a sequence. This uses string.translate.
     :param seq: input sequence as a string
@@ -78,7 +28,7 @@ def revcomp(seq):
     return seq.translate(COMPLEMENT_TABLE)[::-1]
 
 
-def exe_exists(exe_name):
+def exe_exists(exe_name: str) -> bool:
     """
     Check that a executable exists on the Path.
     :param exe_name: the base executable name
@@ -94,7 +44,8 @@ def exe_exists(exe_name):
     return False
 
 
-def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, mapq: int = None, max_cpu: int = None):
+def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
+                    mapq: int = None, max_cpu: int = None) -> int:
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
@@ -131,7 +82,7 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False, 
     return count
 
 
-def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
+def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment) -> Optional[int]:
     """
     Determine the separation between R1 and R2, where the distance is measured from the beginning of each
     read's alignment.
@@ -168,38 +119,71 @@ def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment):
 
 class Counter(ABC):
 
-    def __init__(self, counts):
+    def __init__(self, counts: dict):
         self.counts = {'all': 0, 'unmapped': 0, 'sample': 0, 'accepted': 0}
         self.counts.update(counts)
 
-    def count(self, k):
-        if k == 'analyzed':
+    def count(self, category: str) -> int:
+        """
+        Return the number of counts in a particular category (analyzed, rejected or ...)
+        :param category: the category
+        :return: the counts of category
+        """
+        if category == 'analyzed':
             return self.analyzed()
-        elif k == 'rejected':
+        elif category == 'rejected':
             return self.rejected()
         else:
-            return self.counts[k]
+            return self.counts[category]
 
-    def fraction(self, k, against: str = 'analyzed'):
+    def fraction(self, category: str, against: str = 'analyzed') -> float:
+        """
+        Return the category's fraction compared to one of (accepted, all, analyzed).
+        :param category: the category (numerator)
+        :param against: the denominator
+        :return: a fraction [0,1]
+        """
         if against == 'accepted':
-            return self.count(k) / self.counts['accepted']
+            return self.count(category) / self.counts['accepted']
         elif against == 'all':
-            return self.count(k) / self.counts['all']
+            return self.count(category) / self.counts['all']
         elif against == 'analyzed':
-            return self.count(k) / self.analyzed()
+            return self.count(category) / self.analyzed()
         else:
             raise RuntimeError('parameter \"against\" must be one of [accepted, analyzed or all]')
 
-    def analyzed(self):
+    def analyzed(self) -> int:
+        """
+        The number of reads/pairs analyzed is all items minus those skipped from sub-sampling
+        or which were unmapped.
+        :return: The number of items analyzed
+        """
         return self.counts['all'] - self.counts['sample'] - self.counts['unmapped']
 
-    def rejected(self):
+    def rejected(self) -> int:
+        """
+        :return: The number of reads/pairs which were rejected due to specified constraints.
+        """
         return self.analyzed() - self.counts['accepted']
 
 
 class ReadFilter(Counter):
-    def __init__(self, sample_rate, min_mapq, min_reflen, min_match,
-                 no_secondary, no_supplementary, no_refterm, ref_lengths, random_state):
+
+    def __init__(self, sample_rate: float, min_mapq: int, min_reflen: int, min_match: int,
+                 no_secondary: bool, no_supplementary: bool, no_refterm: bool,
+                 ref_lengths, random_state: np.random.RandomState = None):
+        """
+        Filter reads based on a number of criteria, maintaining counts of the various categorisations
+        :param sample_rate: consider only a fraction of all reads [0..1]
+        :param min_mapq: the minimum acceptable map quality score
+        :param min_reflen: the shortest acceptable reference sequence length
+        :param min_match: match at least this many nt from the start from the read
+        :param no_secondary: reject secondary alignments
+        :param no_supplementary: reject supplementary alignments
+        :param no_refterm: reject alignments which terminate early due to reaching the end of the reference
+        :param ref_lengths: a list of all reference lengths
+        :param random_state: an optional random state required for sub-sampling
+        """
         super().__init__({'mapq': 0, 'sample': 0, 'ref_len': 0, 'secondary': 0,
                           'supplementary': 0, 'weak': 0, 'ref_term': 0})
         self.sample_rate = sample_rate
@@ -210,9 +194,15 @@ class ReadFilter(Counter):
         self.no_supplementary = no_supplementary
         self.no_refterm = no_refterm
         self.ref_lengths = ref_lengths
-        self.unif = random_state.uniform
+        if random_state is not None:
+            self.unif = random_state.uniform
 
-    def accept(self, r):
+    def accept(self, r: pysam.AlignedSegment) -> bool:
+        """
+        Test if a read passes the specified crtiera.
+        :param r: the read to test
+        :return: True if the read is accepted
+        """
         self.counts['all'] += 1
 
         #
@@ -263,19 +253,37 @@ class ReadFilter(Counter):
 class PairFilter(Counter):
 
     def __init__(self, no_trans: bool = False):
+        """
+        Filter paired reads using specified criteria. Keeping track of categorisation counts.
+        :param no_trans: reject trans-mapping pairs (reads that map to different references)
+        """
         super().__init__({'trans': 0})
         self.no_trans = no_trans
 
-    def count(self, k):
-        if k == 'cis':
+    def count(self, category: str) -> int:
+        """
+        Return the count of a category
+        :param category:
+        :return: the count
+        """
+        if category == 'cis':
             return self.cis_count()
         else:
-            return super().count(k)
+            return super().count(category)
 
-    def cis_count(self):
+    def cis_count(self) -> int:
+        """
+        :return: the count of cis-mapping pairs
+        """
         return self.counts['all'] - self.counts['trans']
 
-    def accept(self, r1, r2):
+    def accept(self, r1: pysam.AlignedSegment, r2: pysam.AlignedSegment) -> bool:
+        """
+        Test of a pair passes the specified criteria
+        :param r1: the first read
+        :param r2: the second read
+        :return: True if pair is accepted
+        """
         _accept = True
         self.counts['all'] += 1
         if r1.reference_id != r2.reference_id:
@@ -294,6 +302,26 @@ class read_pairs(object):
                  min_mapq: int = None, min_reflen: int = None, min_match: int = None, no_trans: bool = False,
                  no_secondary: bool = False, no_supplementary: bool = False, no_refterm: bool = False,
                  threads: int = 1, count_reads: bool = False, show_progress: bool = False, is_ipynb: bool = False):
+        """
+        An iterator over the pairs in a bam file, with support for the 'with' statement.
+        Pairs are filtered based on user specified critera. Only pairs, whose read both
+        pass these criteria are emitted. Filteration is done both on the read level and
+        as pairs.
+        :param bam_path: the path to the bam file
+        :param random_state: a numpy random state required if sub-sampling
+        :param sample_rate: consider only a fraction of all reads [0..1]
+        :param min_mapq: the minimum acceptable mapping quality
+        :param min_reflen: the minimum acceptable reference length
+        :param min_match: the number of nt which must align, beginning from the start of a read
+        :param no_trans: reject trans-mapping pairs
+        :param no_secondary: reject secondary alignments
+        :param no_supplementary: reject supplementary alignments
+        :param no_refterm: reject reads which terminate early due to reaching the end of a reference
+        :param threads: the number of concurrent threads when accessing the bam file
+        :param count_reads: before starting, count the number of alignments in the bam file
+        :param show_progress: display progress using tqdm
+        :param is_ipynb: use tqdm widget for ipython notepad
+        """
 
         if random_state is None:
             assert sample_rate is None or sample_rate == 1, 'A random state must be supplied when sub-sampling reads'
@@ -338,7 +366,7 @@ class read_pairs(object):
     def __enter__(self):
         return self
 
-    def close(self):
+    def close(self) -> None:
         if self.bam is not None:
             self.bam.close()
             self.bam = None
@@ -349,7 +377,11 @@ class read_pairs(object):
     def __exit__(self, *a):
         self.close()
 
-    def __iter__(self):
+    def __iter__(self) -> (pysam.AlignedSegment, pysam.AlignedSegment):
+        """
+        Return the next acceptable pair of reads
+        :return: r1, r2
+        """
         pb_update = None if self.progress is None else self.progress.update
         test_read = self.read_filter.accept
         test_pair = self.pair_filter.accept
@@ -380,7 +412,16 @@ class read_pairs(object):
             self.close()
 
 
-def junction_match_length(seq, read, lig_info):
+def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: LigationInfo) -> int:
+    """
+    For a given read, whose 3' end goes beyond the end of its mapped alignment, check if the
+    immediately following nt match sequence the proximity ligation junction. Return the number of
+    nts which matched.
+    :param seq: the sequence of the read
+    :param read: the read mapping object
+    :param lig_info: the ligation details for a given enzyme
+    :return: the number of matching nt (to PL junction) after the end of the alignment
+    """
     if read.is_reverse:
         i = read.query_length - read.query_alignment_start
     else:
@@ -393,7 +434,22 @@ def junction_match_length(seq, read, lig_info):
     return j - lig_info.vest_len
 
 
-def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_mapq=60, threads=1):
+def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
+            sample_rate: float = None, min_mapq: int = 60, threads: int = 1) -> None:
+    """
+    Analyze a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
+    This method attempts to assess details which indicate the overall strength of the
+    Hi-C signal. Here signal is the proportion of proximity ligation pairs relative to
+    shotgun pairs within the mapped read-sets.
+
+    :param bam_file: the path to the bam file
+    :param enzymes: the list of enzyme names used in Hi-C library creation
+    :param mean_insert: the expected mean insert length of the library
+    :param seed: a random integer seed
+    :param sample_rate: consider only a portion of all pairs [0..1]
+    :param min_mapq: the minimum acceptable mapping quality
+    :param threads: the number of threads used in accessing the bam file
+    """
 
     ligation_variants = {}
     for enz in enzymes:
@@ -515,6 +571,7 @@ def analyze(bam_file, enzymes, mean_insert, seed=None, sample_rate=None, min_map
                                 spare = ri.query_alignment_start
                             else:
                                 spare = ri.query_length - ri.query_alignment_end
+
                             m = junction_match_length(seq, ri, lig_info)
                             if (m < max_match and m == spare) or m == max_match:
                                 enzyme_counts[enz]['partial_readthru'] += 1

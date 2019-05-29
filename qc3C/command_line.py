@@ -1,21 +1,9 @@
 import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
+from qc3C._version import version_stamp
 
-__version__ = '0.2.3'
 __log_name__ = 'qc3C.log'
-__copyright__ = """Copyright (C) 2019 Matthew Z DeMaere
-This is free software.  You may redistribute copies of it under the terms of
-the GNU Affero General Public License <https://www.gnu.org/licenses/agpl.html>.
-There is NO WARRANTY, to the extent permitted by law.
-"""
-
-
-def mk_version(full=True):
-    if full:
-        return 'qc3C {}\n{}'.format(__version__, __copyright__)
-    else:
-        return 'qc3C {}'.format(__version__)
 
 
 def main():
@@ -70,7 +58,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print(mk_version())
+        print(version_stamp())
         sys.exit(0)
 
     if args.command is None:
@@ -102,7 +90,7 @@ def main():
     root.addHandler(fh)
 
     # Add some environmental details
-    logger.debug(mk_version(False))
+    logger.debug(version_stamp(False))
     logger.debug(sys.version.replace('\n', ' '))
     logger.debug('Command line: {}'.format(' '.join(sys.argv)))
 

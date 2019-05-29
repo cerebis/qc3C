@@ -1,9 +1,9 @@
 import re
 import numpy as np
 
-from leven import levenshtein
-from collections import namedtuple
 from Bio.Restriction import Restriction
+from collections import namedtuple
+from leven import levenshtein
 from qc3C.exceptions import *
 
 # immutable type used in storing information about enzymatic byproducts in proximity ligation
@@ -11,7 +11,7 @@ LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'cut_site
                                             'junc_len', 'site_len', 'vest_len'))
 
 
-def leven_ratio(a: str, b: str):
+def leven_ratio(a: str, b: str) -> float:
     """
     Compute the levenshtein distance between two strings and return
     the ratio relative to the combined string length
@@ -24,7 +24,7 @@ def leven_ratio(a: str, b: str):
     return (lsum - d) / lsum
 
 
-def get_enzyme_instance(enz_name):
+def get_enzyme_instance(enz_name: str) -> Restriction.RestrictionType:
     """
     Fetch an instance of a given restriction enzyme by its name.
 
@@ -61,7 +61,7 @@ def get_enzyme_instance(enz_name):
         raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
 
 
-def ligation_junction_seq(enz, spacer=''):
+def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
     """
     Determine the sequence presented after successful enzymatic cleavage and ligation. Due
     to the use of enzymes which possess non-zero overhang and the subsequent end-fill step

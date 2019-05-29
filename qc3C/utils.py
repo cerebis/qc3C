@@ -1,11 +1,13 @@
-import numpy as np
 import logging
+import numpy as np
 import os
+
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def warn_if(_test: bool):
+def warn_if(_test: bool) -> int:
     """
     Conditional help for logging warnings.
     :param _test: if true, level is that of WARNING
@@ -17,7 +19,7 @@ def warn_if(_test: bool):
         return logging.INFO
 
 
-def test_for_exe(prog_name):
+def test_for_exe(prog_name: str) -> Optional[str]:
     """
     Test whether a program exists on the system. This can be either a full path
     or just the executable name. This is case sensitive.
@@ -41,7 +43,7 @@ def test_for_exe(prog_name):
     return None
 
 
-def init_random_state(seed: int = None):
+def init_random_state(seed: int = None) -> np.random.RandomState:
     """
     Helper function to initialise a random state using a given seed, or
     from a random seed. The used seed value is sent to log.

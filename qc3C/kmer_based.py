@@ -7,7 +7,8 @@ import gzip
 import logging
 
 from collections import namedtuple
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
+from typing import TextIO, Optional
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
 from qc3C.utils import init_random_state, test_for_exe
 
 try:
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type'])
 
 
-def open_input(file_name):
+def open_input(file_name: str) -> TextIO:
     """
     Open a text file for input. The filename is used to indicate if it has been
     compressed. Recognising gzip and bz2.
@@ -38,7 +39,7 @@ def open_input(file_name):
         return open(file_name, 'rt')
 
 
-def readfq(fp):
+def readfq(fp: TextIO) -> (str, str, Optional[str]):
     """
     Method to quickly read FastA or FastQ files using a generator function.
     Originally sourced from https://github.com/lh3/readfq
@@ -82,7 +83,7 @@ def readfq(fp):
                 break
 
 
-def count_fastq_sequences(file_name, max_cpu=1):
+def count_fastq_sequences(file_name: str, max_cpu: int = 1) -> int:
     """
     Estimate the number of fasta sequences in a file by counting headers. Decompression
     is automatically attempted for files ending in .gz. Counting and decompression is by
@@ -111,8 +112,9 @@ def count_fastq_sequences(file_name, max_cpu=1):
     return n
 
 
-def print_report(hic, all, lig_info, mean_insert, cumulative_length, reads_evaluated,
-                 starts_with_cutsite, failed_wgs, failed_jnc, failed_cov, max_coverage):
+def print_report(hic: pandas.DataFrame, all: pandas.DataFrame, lig_info: LigationInfo,
+                 mean_insert: int, cumulative_length: int, reads_evaluated: int, starts_with_cutsite: int,
+                 failed_wgs: int, failed_jnc: int, failed_cov: int, max_coverage: int) -> None:
     """
     Print a report of analysis results.
 
@@ -165,8 +167,8 @@ def print_report(hic, all, lig_info, mean_insert, cumulative_length, reads_evalu
             logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
 
 
-def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
-            sample_rate=None, max_coverage=500, threads=1, save_cov=False):
+def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
+            sample_rate: float = None, max_coverage: int = 500, threads: int = 1, save_cov: bool = False) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -183,7 +185,7 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
     :param save_cov: if True, write collected observations to file
     """
 
-    def collect_coverage(seq, ix, site_size, k, min_cov=0):
+    def collect_coverage(seq: str, ix: int, site_size: int, k: int, min_cov: int = 0) -> (float, float):
         """
         Collect the k-mer coverage centered around the position ix. From the left, the sliding
         window begins just before the site region and slides right until just after. Means
@@ -210,7 +212,8 @@ def analyze(k_size, enzyme, kmer_db, read_list, mean_insert, seed=None,
             sliding_cov[i] = k_cov
         return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
-    def next_read(filename, site, k_size, prob_accept, progress):
+    def next_read(filename: str, site: str, k_size: int,
+                  prob_accept: float, progress) -> (str, Optional[int], str, int):
         """
         Create a generator function which returns sequence data site positions
         from a FastQ file.
