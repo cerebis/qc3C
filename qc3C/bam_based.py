@@ -6,7 +6,7 @@ import pysam
 import subprocess
 import tqdm
 from typing import Optional
-from abc import ABC
+from abc import ABC, abstractmethod
 
 from qc3C.exceptions import NameSortingException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
@@ -122,6 +122,10 @@ class Counter(ABC):
     def __init__(self, counts: dict):
         self.counts = {'all': 0, 'unmapped': 0, 'sample': 0, 'accepted': 0}
         self.counts.update(counts)
+
+    @abstractmethod
+    def accept(self, **kwargs: pysam.AlignedSegment) -> bool:
+        pass
 
     def count(self, category: str) -> int:
         """
