@@ -2,7 +2,7 @@ import re
 import numpy as np
 
 from Bio.Restriction import Restriction
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from leven import levenshtein
 from qc3C.exceptions import *
 
@@ -102,3 +102,21 @@ def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
     vest = vestigial_site()
     return LigationInfo(str(enz), junc.upper(), enz.site.upper(), vest.upper(),
                         len(junc), enz.size, len(vest))
+
+
+def restriction_enzyme_by_site() -> defaultdict:
+    """
+    Create a dictionary of restriction enzyme names known to BioPython, indexed by their recognition site.
+    :return: a dict (k=site, v=list of enzyme names)
+    """
+    by_site = defaultdict(list)
+    for cl_name in dir(Restriction):
+        # avoid some additional non-enzyme classes within the Restriction module
+        if cl_name[0].isupper() and cl_name[-1].isupper():
+            try:
+                clazz = getattr(Restriction, cl_name)
+                if clazz.size == 4:
+                    by_site[clazz.site].append(str(clazz))
+            except AttributeError:
+                pass
+    return by_site
