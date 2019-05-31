@@ -39,12 +39,12 @@ def open_input(file_name: str) -> TextIO:
         return open(file_name, 'rt')
 
 
-def readfq(fp: TextIO) -> (str, str, Optional[str]):
+def read_seq(fp: TextIO) -> (str, str, Optional[str]):
     """
     Method to quickly read FastA or FastQ files using a generator function.
     Originally sourced from https://github.com/lh3/readfq
-    :param fp:
-    :return:
+    :param fp: input file object
+    :return: tuple
     """
     last = None  # this is a buffer keeping the last unprocessed line
 
@@ -224,7 +224,7 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
         :param progress: progress bar for user feedback
         :return: yield tuple of (sequence, site_position, read_id, sequence length)
         """
-        reader = readfq(open_input(filename))
+        reader = read_seq(open_input(filename))
         site_size = len(site)
 
         for _id, _seq, _qual in reader:
