@@ -12,25 +12,24 @@ Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 
 **BAM mode**
 ```$bash
-> qc3C bam --mean-insert 300 -e Sau3AI --enzyme MluCI --bam hic_to_ref.bam
+> qc3C bam --mean-insert 500 -enzyme Sau3AI --enzyme MluCI --bam hic_to_ref.bam
 
 ```
 **Kmer mode**
 ```$bash
-> qc3C kmer --mean-insert 500 -enzyme Sau3AI --kmer-size 24 --reads run.fq.gz --lib 24mer.jf
+> qc3C kmer --mean-insert 500 -enzyme Sau3AI --reads run.fq.gz --lib 24mer.jf
 ```
 
 
 **Command help**
 
 ```$bash
-usage: qc3C [-h] [-v] [-V] {bam,kmer} ...
+usage: qc3C [-h] [-V] {bam,kmer} ...
 
 qc3C: Hi-C quality control
 
 optional arguments:
   -h, --help     show this help message and exit
-  -v, --verbose  Verbose output
   -V, --version  Version
 
 commands:
@@ -40,13 +39,14 @@ commands:
 ```
 
 ```$bash
-usage: qc3C bam [-h] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
-                MEAN_INSERT -b BAM
+usage: qc3C bam [-h] [-v] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
+                MEAN_INSERT [-q MIN_MAPQ] -b BAM
 
 Alignment-based analysis.
 
 optional arguments:
   -h, --help            show this help message and exit
+  -v, --verbose         Verbose output
   -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
                         Sample only a proportion of all read-pairs [None]
   -s SEED, --seed SEED  Random seed used in sampling the read-set
@@ -57,19 +57,22 @@ optional arguments:
   -m MEAN_INSERT, --mean-insert MEAN_INSERT
                         Mean fragment length to use in estimating the
                         unobserved junction rate
+  -q MIN_MAPQ, --min-mapq MIN_MAPQ
+                        Minimum acceptable mapping quality [60]
   -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to
                         references
 ```
 
 ```$bash
-usage: qc3C kmer [-h] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
-                 MEAN_INSERT [--save-cov] [-x MAX_COVERAGE] -k KMER_SIZE -l
-                 KMER_LIB -r FASTQ_FILE
+usage: qc3C kmer [-h] [-v] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
+                 MEAN_INSERT [--output-table OUTPUT_TABLE] [-x MAX_COVERAGE]
+                 -l KMER_LIB -r FASTQ_FILE
 
 Kmer-based analysis.
 
 optional arguments:
   -h, --help            show this help message and exit
+  -v, --verbose         Verbose output
   -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
                         Sample only a proportion of all read-pairs [None]
   -s SEED, --seed SEED  Random seed used in sampling the read-set
@@ -80,11 +83,10 @@ optional arguments:
   -m MEAN_INSERT, --mean-insert MEAN_INSERT
                         Mean fragment length to use in estimating the
                         unobserved junction rate
-  --save-cov            Save the collected coverage information to file
+  --output-table OUTPUT_TABLE
+                        Save the collected per-read statistics table to a file
   -x MAX_COVERAGE, --max-coverage MAX_COVERAGE
                         Ignore regions with more than this coverage [500]
-  -k KMER_SIZE, --kmer_size KMER_SIZE
-                        Kmer size used in database
   -l KMER_LIB, --lib KMER_LIB
                         Jellyfish kmer database
   -r FASTQ_FILE, --reads FASTQ_FILE
