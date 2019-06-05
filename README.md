@@ -2,9 +2,23 @@
 
 qc3C attempts to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library. That is, read-pairs which are a true product of proximity ligation, rather than self-religation or shotgun noise. To accomplish this, two modes of analysis are available: BAM analysis and assembly-free kmer analysis. 
 
-The BAM analysis mode requires that Hi-C reads are first mapped to a reference, preferably the same genome as was used in producing the Hi-C library. The reference can be in the form of a closed genome or assembly contigs. We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`.
- 
-As a reference genome or assembly is not necessary available at QC time, a second assembly-free analysis mode avoids this significant requirement. At present qc3C relies on a kmer database generated separately using [Jellyfish](https://github.com/gmarcais/jellyfish).
+#### Bam mode
+The bam analysis mode requires that Hi-C reads are first mapped to a reference, preferably the same genome as was used in producing the Hi-C library. The reference can be in the form of a closed genome or assembly contigs. We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`.
+
+To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference
+
+```$bash
+bwa mem -5SP contigs.fa hic_reads.fq | samtools view -F 0x904 -bS - | samtools sort -n -o hic_to_ref.bam -
+```
+
+#### K-mer mode 
+As a reference sequence is not necessary available at QC time, a second k-mer based approach is provided. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to externally generate the k-mer library and Jellyfish's Python hooks internally during analysis.
+
+From a Hi-C read-set, a Jellyfish k-mer library of size 24 could be generated as follows:
+
+```$bash
+jellyfish count -m 24 -s 2G -C -o 24mers.jf hic_reads.fq 
+```
 
 In either case, qc3C searches for evidence of proximity ligations to infer whether or not a generated library contains strong signal. Used after performing a small assessment sequencing run, this information allows researchers to choose to a full sequencing run that is more or less deep, or abandon a library entirely. 
 
@@ -17,7 +31,7 @@ Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 ```
 **Kmer mode**
 ```$bash
-> qc3C kmer --mean-insert 500 -enzyme Sau3AI --reads run.fq.gz --lib 24mer.jf
+> qc3C kmer --mean-insert 500 -enzyme Sau3AI --reads hic_reads.fq --lib 24mers.jf
 ```
 
 
