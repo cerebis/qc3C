@@ -8,6 +8,7 @@ import logging
 
 from collections import namedtuple
 from typing import TextIO, Optional
+from qc3C.exceptions import InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
 from qc3C.utils import init_random_state, test_for_exe
 
@@ -19,7 +20,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type'])
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos'])
 
 
 def open_input(file_name: str) -> TextIO:
@@ -113,8 +114,7 @@ def count_fastq_sequences(file_name: str, max_cpu: int = 1) -> int:
 
 
 def print_report(hic: pandas.DataFrame, all: pandas.DataFrame, lig_info: LigationInfo,
-                 mean_insert: int, cumulative_length: int, reads_evaluated: int, starts_with_cutsite: int,
-                 failed_wgs: int, failed_jnc: int, failed_cov: int, max_coverage: int) -> None:
+                 mean_insert: int, cumulative_length: int, reads_evaluated: int, starts_with_cutsite: int) -> None:
     """
     Print a report of analysis results.
 
@@ -125,20 +125,11 @@ def print_report(hic: pandas.DataFrame, all: pandas.DataFrame, lig_info: Ligatio
     :param cumulative_length: the cumulative length of analyzed sequencing reads in bp
     :param reads_evaluated: the number of reads evaluated in the analysis
     :param starts_with_cutsite: the number of reads which began with a cut-site
-    :param failed_wgs: number of wgs reads abandoned from containing ambiguous sequence
-    :param failed_jnc: number of junction reads abandoned from containing ambiguous sequence
-    :param failed_cov: number of redas rejected due to excessive coverage
-    :param max_coverage: maximum acceptable coverage with parsing reads
     """
 
-    logger.info('Number of reads abandoned due to ambiguous sequence. wgs: {:,} frac: {:#.4g}, junction: {:,} frac: {:#.4g}'
-                .format(failed_wgs, failed_jnc, failed_wgs / reads_evaluated, failed_jnc / reads_evaluated))
-    logger.info('Number of reads abandoned due to coverage > {}: {:,} frac: {:#.4g}'
-                .format(max_coverage, failed_cov, failed_cov / reads_evaluated))
-
-    logger.info('Fraction of reads starting with a cut site: {:#.4g}'.format(starts_with_cutsite / reads_evaluated))
-    logger.info('Expected fraction by random chance 50% GC: {:#.4g}'.format(1 / 4 ** lig_info.site_len))
-    logger.info('Fraction of reads containing the junction sequence: {:#.4g}'.format(len(hic) / reads_evaluated))
+    logger.info('Fraction of reads starting with a cut site: {:#.3f}%'.format(starts_with_cutsite / reads_evaluated * 100))
+    logger.info('Expected fraction by random chance 50% GC: {:#.3f}%'.format(1 / 4 ** lig_info.site_len * 100))
+    logger.info('Fraction of reads containing the junction sequence: {:#.2f}%'.format(len(hic) / reads_evaluated * 100))
 
     cur_pval = 0
     sum_pvals = 0
@@ -153,28 +144,37 @@ def print_report(hic: pandas.DataFrame, all: pandas.DataFrame, lig_info: Ligatio
     fraction_hic = sum_pvals / reads_evaluated
     hic_stddev = np.sqrt(var_pvals) / reads_evaluated
 
-    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
+    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.2f} \u00b1 {:#.2f} %'
+                .format(fraction_hic * 100, hic_stddev * 100))
+
+    mean_read_len = cumulative_length / reads_evaluated
+    logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
 
     if mean_insert is not None:
-        unobserved_fraction = (mean_insert - (cumulative_length / reads_evaluated) * 2) / mean_insert
+        unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
+
         if unobserved_fraction < 0:
-            logger.warning('Estimated unobserved fraction < 0, therefore adjustment will not be applied')
-            logger.warning('Check that the supplied mean insert length is not too short')
+            unobserved_fraction = 0
+            logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
+                           'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
+                           .format(mean_insert, unobserved_fraction))
         else:
-            logger.info('Estimated unobserved fraction: {:#.4g}'.format(unobserved_fraction))
+            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                        .format(mean_insert, unobserved_fraction))
             fraction_hic += fraction_hic * unobserved_fraction
-            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'.format(mean_insert))
-            logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} +/- {:#.4g}'.format(fraction_hic, hic_stddev))
+            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'
+                        .format(mean_insert))
+            logger.info('Adjusted estimation of Hi-C read fraction: {:#.2f} \u00b1 {:#.2f} %'
+                        .format(fraction_hic * 100, hic_stddev * 100))
 
 
-def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, max_coverage: int = 500, threads: int = 1, save_cov: bool = False) -> None:
+def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
+            sample_rate: float = None, max_coverage: int = 500, threads: int = 1, output_table: str = None) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
         
-    :param k_size: kmer size used when building the kmer database 
-    :param enzyme: the enzyme used during digestion 
+    :param enzyme: the enzyme used during digestion
     :param kmer_db: the jellyfish kmer database
     :param read_list: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
@@ -182,7 +182,7 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
     :param sample_rate: probability of accepting an observation. If None accept all.
     :param max_coverage: ignore kmers with coverage greater than this value
     :param threads: use additional threads for supported steps
-    :param save_cov: if True, write collected observations to file
+    :param output_table: if not None, write the full pandas table to the specified path
     """
 
     def collect_coverage(seq: str, ix: int, site_size: int, k: int, min_cov: int = 0) -> (float, float):
@@ -212,8 +212,44 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
             sliding_cov[i] = k_cov
         return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
+    class Counter(object):
+        def __init__(self):
+            self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0}
+
+        def __getitem__(self, item: str):
+            return self.counts[item]
+
+        def __setitem__(self, key: str, value: int):
+            assert key in self.counts, 'Key value {} was not found'.format(key)
+            self.counts[key] = value
+
+        def __iadd__(self, other):
+            if not isinstance(other, Counter):
+                raise RuntimeError()
+            for k, v in other.counts.items():
+                self.counts[k] += v
+            return self
+
+        def update(self, _dict):
+            for k, v in _dict.items():
+                self.counts[k] = v
+
+        def accepted(self) -> int:
+            return self.counts['all'] - self.rejected()
+
+        def rejected(self) -> int:
+            return self.counts['sample'] + self.counts['short'] + self.counts['flank']
+
+        def fraction(self, key):
+            if key == 'accepted':
+                return self.accepted() / self.counts['all']
+            elif key == 'rejected':
+                return self.rejected() / self.counts['all']
+            else:
+                return self.counts[key] / self.counts['all']
+
     def next_read(filename: str, site: str, k_size: int,
-                  prob_accept: float, progress) -> (str, Optional[int], str, int):
+                  prob_accept: float, progress, counts: Counter) -> (str, Optional[int], str, int):
         """
         Create a generator function which returns sequence data site positions
         from a FastQ file.
@@ -222,19 +258,27 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
         :param k_size: the k-mer size used in the counting database
         :param prob_accept: probability threshold used to subsample the full read-set
         :param progress: progress bar for user feedback
+        :param counts: a tracker class for various rejection conditions
         :return: yield tuple of (sequence, site_position, read_id, sequence length)
         """
         reader = read_seq(open_input(filename))
         site_size = len(site)
 
+        _all = 0
+        _flank = 0
+        _sample = 0
+        _short = 0
         for _id, _seq, _qual in reader:
+            _all += 1
             progress.update()
             seq_len = len(_seq)
             # skip sequences which are too short to analyze
             if seq_len < 2 * k_size + site_size + 1:
+                _short += 1
                 continue
             # subsampling read-set
             if prob_accept is not None and prob_accept < unif():
+                _sample += 1
                 continue
             # search for the site
             _seq = _seq.upper()
@@ -245,17 +289,42 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
             # only report sites which meet flank constraints
             elif k_size <= _ix <= (seq_len - (k_size + site_size)):
                 yield _seq, _ix, _id, seq_len
+            else:
+                _flank += 1
+
+        counts.update({'all': _all, 'sample': _sample, 'short': _short, 'flank': _flank})
+
+    def get_kmer_size(filename: str) -> int:
+        """
+        Retrieve the k-mer size used in a library by reading the first record.
+        This assumes all mers within the library have the same k-mer size.
+        :param filename:
+        :return: the size of the k-mer used in a Jellyfish library
+        """
+        iter_mer = dna_jellyfish.ReadMerFile(filename)
+        current_mer = iter_mer.mer()
+        k_size = current_mer.k()
+        del iter_mer
+        return k_size
 
     # Determine the junction, treat as uppercase
     lig_info = ligation_junction_seq(get_enzyme_instance(enzyme))
     junc_site = lig_info.junction
     junc_size = lig_info.junc_len
     cut_site = lig_info.cut_site
+
     # TODO for flexible flanks could be handled if L/R flanks treated independently
+    k_size = get_kmer_size(kmer_db)
     flank_size = (k_size - junc_size) // 2
 
+    logger.info('Found a k-mer size of {}nt for the Jellyfish library at {}'.format(k_size, kmer_db))
+    logger.info('The enzyme {} with cut-site {} produces an {}nt ligation junction sequence of {}'
+                .format(lig_info.enzyme_name, lig_info.elucidation, lig_info.junc_len, lig_info.junction))
+    logger.info('For this k-mer size and enzyme, the flanks are {}nt'.format(flank_size))
+    logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'.format(k_size + 2*flank_size))
+
     # some sanity checks.
-    assert k_size - junc_size > 0, 'Kmer size must be larger the the junction size'
+    assert k_size > junc_size, 'Kmer size must be larger the the junction size'
     assert (k_size - junc_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
 
     # for efficiency, disable sampling if rate is 1
@@ -307,14 +376,18 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
 
     with tqdm.tqdm(desc=initial_desc, total=n_reads) as progress:
 
+        analysis_counter = Counter()
+
         cov_obs = []
         for n, reads in enumerate(read_list, 1):
 
             if n > 1:
                 progress.set_description('Progress (file {})'.format(n))
 
+            read_counter = Counter()
+
             # set up the generator over FastQ reads, with sub-sampling
-            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress)
+            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress, read_counter)
 
             while True:
 
@@ -375,7 +448,32 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
                 cumulative_length += seq_len
 
                 # record this observation
-                cov_obs.append(CovInfo(mean_inner, mean_outer, rtype))
+                cov_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix))
+
+            if read_counter.fraction('rejected') > 0.9:
+                logger.warning('More than 90% of reads were rejected in the file {}'.format(reads))
+
+            analysis_counter += read_counter
+
+    logger.info('Fraction of rejected reads during parsing: '
+                'sampling {:#.2f}% too_short {:#.2f}% no_flank {:#.2f}%'
+                .format(analysis_counter.fraction('sample') * 100,
+                        analysis_counter.fraction('short') * 100,
+                        analysis_counter.fraction('flank') * 100))
+
+    # Handle instances where no reads were emitted during parsing.
+    if analysis_counter.accepted() == 0:
+        raise InsufficientDataException('No reads were accepted during parsing.')
+
+    logger.info('Fraction of rejected reads during analysis: '
+                'no_junc {:#.2f}%, contains_N {:#.2f}%, high_cov {:#.2}%'
+                .format(failed_wgs / reads_evaluated * 100,
+                        failed_jnc / reads_evaluated * 100,
+                        failed_cov / reads_evaluated * 100))
+
+    # Handle instances were no emitted reads formed useful observations.
+    if len(cov_obs) == 0:
+        raise InsufficientDataException('No reads formed acceptable observations.')
 
     # lets do some tabular munging, making sure that our categories are explicit
     all_df = pandas.DataFrame(cov_obs)
@@ -390,22 +488,14 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
     logger.info('Rows removed with no coverage: inner {}, outer {}, shared {}'.format(
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-    n_sampled = len(all_df)
-    if n_sampled == 0:
-        raise RuntimeError('The sample set was empty. '
-                           'Please check that the kmer database and read-set are correctly matched and '
-                           'that --max-n is not set too small')
-
     all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
 
     agg_rtype = all_df.groupby('read_type').size()
     logger.info('Collected observation breakdown. wgs: {:,} junction: {:,}'.format(agg_rtype.wgs, agg_rtype.hic))
     if agg_rtype.wgs == 0:
-        raise RuntimeError('No wgs examples were contained in the collected sample. '
-                           'Consider increasing --max-n')
+        raise InsufficientDataException('No reads classified as wgs were observed.')
     if agg_rtype.hic == 0:
-        raise RuntimeError('No junction examples were contained in the collected sample. '
-                           'Consider increasing --max-n')
+        raise InsufficientDataException('No reads containing junctions were observed.')
 
     # the suspected non-hic observations
     wgs_df = all_df.loc[all_df.read_type == 'wgs'].copy()
@@ -423,10 +513,18 @@ def analyze(k_size: int, enzyme: str, kmer_db: str, read_list: list, mean_insert
     all_df.reset_index(inplace=True, drop=True)
 
     print_report(hic_df, all_df, lig_info, mean_insert, cumulative_length,
-                 reads_evaluated, starts_with_cutsite,
-                 failed_wgs, failed_jnc, failed_cov, max_coverage)
+                 reads_evaluated, starts_with_cutsite)
 
     # combine them together
-    if save_cov:
-        logger.info('Writing observations to gzipped tsv file: {}'.format('cov_dat.tsv.gz'))
-        all_df.to_csv(gzip.open('cov_dat.tsv.gz', 'wt'), sep='\t')
+    if output_table is not None:
+        import os
+        # append the gzip suffix is required
+        if not output_table.endswith('.gz'):
+            output_table = '{}.gz'.format(output_table)
+        # don't overwrite existing files
+        if os.path.exists(output_table):
+            logging.WARNING('The path {} already exists, output table was not written'.format(output_table))
+        else:
+            logger.info('Writing observations to gzipped tab-delimited file: {}'.format(output_table))
+            with gzip.open(output_table, 'wt') as out_h:
+                all_df.to_csv(out_h, sep='\t')

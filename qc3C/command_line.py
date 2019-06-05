@@ -1,6 +1,7 @@
 import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
+from qc3C.exceptions import ApplicationException
 from qc3C._version import version_stamp
 
 __log_name__ = 'qc3C.log'
@@ -37,18 +38,18 @@ def main():
     """
     CLI for BAM based analysis
     """
+    cmd_bam.add_argument('-q', '--min-mapq', default=60, type=int,
+                         help='Minimum acceptable mapping quality [60]')
     cmd_bam.add_argument('-b', '--bam', required=True,
                          help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
     CLI for Kmer based analysis
     """
-    cmd_kmer.add_argument('--save-cov', default=False, action='store_true',
-                          help='Save the collected coverage information to file')
+    cmd_kmer.add_argument('--output-table', default=None,
+                          help='Save the collected per-read statistics table to a file')
     cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int,
                           help='Ignore regions with more than this coverage [500]')
-    cmd_kmer.add_argument('-k','--kmer-size', type=int, required=True,
-                          help='Kmer size used in database')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
@@ -106,7 +107,7 @@ def main():
         if args.command == 'bam':
 
             bam.analyze(args.bam, args.enzyme, args.mean_insert, seed=args.seed,
-                        sample_rate=args.sample_rate, threads=args.threads)
+                        sample_rate=args.sample_rate, threads=args.threads, min_mapq=args.min_mapq)
 
         # Kmer based analysis
         elif args.command == 'kmer':
@@ -117,9 +118,13 @@ def main():
             if len(args.enzyme) > 1:
                 parser.error('kmer analysis mode only supports a single enyzme')
 
-            kmer.analyze(args.kmer_size, args.enzyme[0], args.lib, args.reads, args.mean_insert,
+            kmer.analyze(args.enzyme[0], args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
-                         threads=args.threads, save_cov=args.save_cov)
+                         threads=args.threads, output_table=args.output_table)
+
+    except ApplicationException as ex:
+        logger.error(str(ex))
+        sys.exit(1)
 
     except Exception as ex:
         logger.exception(ex)

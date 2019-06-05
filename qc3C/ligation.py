@@ -2,13 +2,13 @@ import re
 import numpy as np
 
 from Bio.Restriction import Restriction
-from collections import namedtuple, defaultdict
+from collections import namedtuple
 from leven import levenshtein
 from qc3C.exceptions import *
 
 # immutable type used in storing information about enzymatic byproducts in proximity ligation
 LigationInfo = namedtuple('ligation_info', ('enzyme_name', 'junction', 'cut_site', 'vestigial',
-                                            'junc_len', 'site_len', 'vest_len'))
+                                            'junc_len', 'site_len', 'vest_len', 'elucidation'))
 
 
 def leven_ratio(a: str, b: str) -> float:
@@ -61,7 +61,7 @@ def get_enzyme_instance(enz_name: str) -> Restriction.RestrictionType:
         raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
 
 
-def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
+def ligation_junction_seq(enz, spacer: str = '', no_ambig: bool = True) -> LigationInfo:
     """
     Determine the sequence presented after successful enzymatic cleavage and ligation. Due
     to the use of enzymes which possess non-zero overhang and the subsequent end-fill step
@@ -74,10 +74,8 @@ def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
 
     :params enz: biopython restriction instance
     :params spacer: optional string with which to separate site elements (debugging)
+    :params no_ambig: throws an exception when true and an enzyme contains ambiguous symbols in its recognition site
     """
-    assert not enz.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
-    assert not enz.is_blunt(), 'enzyme produces blunt ends'
-
     def vestigial_site():
         """
         Determine the part of the cut-site that will remain when a ligation junction is
@@ -88,6 +86,10 @@ def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
         while i < enz.size and enz.site[i] == junc[i]:
             i += 1
         return str(enz.site[:i])
+
+    assert not enz.is_blunt(), 'enzyme produces blunt ends'
+    if no_ambig:
+        assert not enz.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
 
     end5, end3 = '', ''
     site = str(enz.site)
@@ -101,22 +103,24 @@ def ligation_junction_seq(enz, spacer: str = '') -> LigationInfo:
     junc = '{0}{3}{1}{3}{1}{3}{2}'.format(end5, enz.ovhgseq, end3, spacer)
     vest = vestigial_site()
     return LigationInfo(str(enz), junc.upper(), enz.site.upper(), vest.upper(),
-                        len(junc), enz.size, len(vest))
+                        len(junc), enz.size, len(vest), enz.elucidate())
 
 
-def restriction_enzyme_by_site() -> defaultdict:
+def restriction_enzyme_by_site(size: int = None) -> dict:
     """
     Create a dictionary of restriction enzyme names known to BioPython, indexed by their recognition site.
     :return: a dict (k=site, v=list of enzyme names)
     """
-    by_site = defaultdict(list)
+    by_site = {}
     for cl_name in dir(Restriction):
         # avoid some additional non-enzyme classes within the Restriction module
         if cl_name[0].isupper() and cl_name[-1].isupper():
             try:
                 clazz = getattr(Restriction, cl_name)
-                if clazz.size == 4:
-                    by_site[clazz.site].append(str(clazz))
+                if size is not None and clazz.size == size:
+                    by_site.setdefault(clazz.site, []).append(str(clazz))
+                else:
+                    by_site.setdefault(clazz.site, []).append(str(clazz))
             except AttributeError:
                 pass
     return by_site

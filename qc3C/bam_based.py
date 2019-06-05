@@ -652,19 +652,24 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     .format(short_count,
                             short_count / pair_parser.pair_filter.cis_count()*100))
 
-        emp_mean = short_sum / short_count
-        mean_err = (emp_mean - mean_insert) / mean_insert
-        logger.log(warn_if(mean_err > 0.1),
-                   'Observed short-range mean pair separation differs from supplied insert length by {:.1f}%'
-                   .format(mean_err * 100))
-
-        if short_count > 10 * mean_insert:
-            logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
-                        .format(emp_mean,
-                                short_median_est))
+        # by default, we assume no fraction has gone unobserved
+        if short_count == 0:
+            emp_mean = None
+            logger.warning('Cannot estimate insert length, no short-range cis-mapping pairs [< 1000nt].')
         else:
-            logger.warning('Too few short-range pairs for reliable streaming median estimation')
-            logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
+            emp_mean = short_sum / short_count
+            mean_err = (emp_mean - mean_insert) / mean_insert
+            logger.log(warn_if(mean_err > 0.1),
+                       'Observed short-range mean pair separation differs from supplied insert length by {:.1f}%'
+                       .format(mean_err * 100))
+
+            if short_count > 10 * mean_insert:
+                logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
+                            .format(emp_mean,
+                                    short_median_est))
+            else:
+                logger.warning('Too few short-range pairs for reliable streaming median estimation')
+                logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
 
         # predict unobserved fraction using a uniform model of junction location
         # across the observed mean insert length
@@ -672,6 +677,13 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
         unobs_frac = {}
         for _tag, _insert_len in {'supplied': mean_insert, 'observed': emp_mean}.items():
+
+            # no mean was supplied or the observed could not be estimated
+            if _insert_len is None:
+                # this will be used later as an indicator of absence
+                unobs_frac[_tag] = None
+                continue
+
             unobs_frac[_tag] = (_insert_len - mean_read_len * 2) / _insert_len
             if unobs_frac[_tag] < 0:
                 unobs_frac[_tag] = 0
@@ -688,12 +700,12 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         # per-enzyme statistics
         for enz, counts in enzyme_counts.items():
-            logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.2f}%'
+            logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
                         .format(enz,
                                 1 / 4 ** ligation_variants[enz].vest_len * 100))
             logger.info('For {}, cut-site {} has remnant {}'
                         .format(enz,
-                                ligation_variants[enz].cut_site,
+                                ligation_variants[enz].elucidation,
                                 ligation_variants[enz].vestigial))
             logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.2f}%)'
                         .format(enz,
@@ -726,11 +738,17 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                                 counts['is_split'],
                                 counts['is_split'] / pair_counts['total']*100))
 
-            p_ub = delta_cs / pair_counts['total']
-            logger.info('For {} using observed data, adjusted estimation of Hi-C fraction: ({:#.2f}-{:#.2f}%)'
-                        .format(enz,
-                                (p_obs + p_obs * unobs_frac['observed']) * 100,
-                                (p_ub + p_ub * unobs_frac['observed']) * 100))
+            for _tag, _frac in unobs_frac.items():
+                if _frac is None:
+                    logger.info('For {} there was insufficient {} data,     no adjustment could be made to Hi-C fraction'
+                                .format(enz, _tag))
+                    continue
+
+                p_ub = delta_cs / pair_counts['total']
+                logger.info('For {} based on {} data, adjusted estimation of Hi-C fraction: ({:#.2f}-{:#.2f}%)'
+                            .format(enz, _tag,
+                                    (p_obs + p_obs * _frac) * 100,
+                                    (p_ub + p_ub * _frac) * 100))
 
         # long-range bin counts, with formatting to align fields
         field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
