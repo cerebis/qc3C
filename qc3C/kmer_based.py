@@ -113,59 +113,76 @@ def count_fastq_sequences(file_name: str, max_cpu: int = 1) -> int:
     return n
 
 
-def print_report(hic: pandas.DataFrame, all: pandas.DataFrame, lig_info: LigationInfo,
-                 mean_insert: int, cumulative_length: int, reads_evaluated: int, starts_with_cutsite: int) -> None:
+def assign_empirical_pvalues_uniq(df: pandas.DataFrame) -> pandas.DataFrame:
     """
-    Print a report of analysis results.
-
-    :param hic: the table of hi-c observations
-    :param all:  the table of all (wgs + hi-c) observations
-    :param lig_info: details of possible ligations in experiment
-    :param mean_insert: the mean insert size used in library generation
-    :param cumulative_length: the cumulative length of analyzed sequencing reads in bp
-    :param reads_evaluated: the number of reads evaluated in the analysis
-    :param starts_with_cutsite: the number of reads which began with a cut-site
+    Taking in a mixed DataFrame containing both wgs and hic observations, assign empirical
+    p-values to the wgs observations. Duplicate ratio values are dropped for both WGS and Hi-C
+    observations (separately). Consequently, the returned DataFrame contains only these unique rows.
+    :param df: a combined DataFrame of both Hi-C and WGS observations
+    :return: a DataFrame with only read_type, ratio and pvalue columns
     """
+    # columns to use and return
+    _cols = ('read_type', 'ratio', 'pvalue')
+    # extract the WGS obs, remove duplicates and sort
+    wgs_uniq = df.loc[df.read_type == 'wgs', _cols].drop_duplicates('ratio').sort_values('ratio')
+    # get the underlying numpy array
+    arr = wgs_uniq.to_numpy()
+    # impose linear spacing of p-value bins
+    pval_bin = 1 / arr.shape[0]
+    # distribute linearly increasing p-values across the sorted WGS observations
+    arr[:, 2] = np.arange(1, arr.shape[0]+1) * pval_bin
+    # extract the Hi-C obs and remove dupes
+    hic_uniq = df.loc[df.read_type == 'hic', _cols].drop_duplicates('ratio')
+    hic_uniq.pvalue = None
+    # recombine the WGS and Hi-C observations as a DataFrame, sort and reindex.
+    return pandas.DataFrame(arr, columns=_cols).append(hic_uniq).sort_values('ratio').reset_index(drop=True)
 
-    logger.info('Fraction of reads starting with a cut site: {:#.3f}%'.format(starts_with_cutsite / reads_evaluated * 100))
-    logger.info('Expected fraction by random chance 50% GC: {:#.3f}%'.format(1 / 4 ** lig_info.site_len * 100))
-    logger.info('Fraction of reads containing the junction sequence: {:#.2f}%'.format(len(hic) / reads_evaluated * 100))
 
-    cur_pval = 0
-    sum_pvals = 0
-    var_pvals = 0
-    for row in all[['pvalue', 'read_type']].itertuples():
-        if pandas.notnull(row.pvalue):
-            cur_pval = row.pvalue
-        if row.read_type == 'hic':
-            sum_pvals += 1 - cur_pval
-            var_pvals += cur_pval * (1 - cur_pval)
-
-    fraction_hic = sum_pvals / reads_evaluated
-    hic_stddev = np.sqrt(var_pvals) / reads_evaluated
-
-    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.2f} \u00b1 {:#.2f} %'
-                .format(fraction_hic * 100, hic_stddev * 100))
-
-    mean_read_len = cumulative_length / reads_evaluated
-    logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
-
-    if mean_insert is not None:
-        unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
-
-        if unobserved_fraction < 0:
-            unobserved_fraction = 0
-            logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
-                           'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, unobserved_fraction))
+def distribute_pvalues(df: pandas.DataFrame) -> pandas.DataFrame:
+    """
+    Traverse the table of observations by ascending ratio. When encountering a Hi-C
+    observation (which should be unassigned) assign the last p-value seen from the
+    WGS observations.
+    :param df: the DataFrame of WGS and Hi-C observations, sorted by ascending ratio
+    :return: a DataFrame with p-values assigned to Hi-C observations
+    """
+    # get underlying numpy array and column indices
+    arr = df.to_numpy()
+    ix_pval = df.columns.get_loc('pvalue')
+    ix_rt = df.columns.get_loc('read_type')
+    # the most recent p-value
+    current_p = arr[0, ix_pval]
+    for i in range(arr.shape[0]):
+        # update p-value
+        if arr[i, ix_rt] == 'wgs':
+            current_p = arr[i, ix_pval]
+        # distribute current p-value to hi-c obs
+        elif arr[i, ix_rt] == 'hic':
+            arr[i, ix_pval] = current_p
         else:
-            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(mean_insert, unobserved_fraction))
-            fraction_hic += fraction_hic * unobserved_fraction
-            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'
-                        .format(mean_insert))
-            logger.info('Adjusted estimation of Hi-C read fraction: {:#.2f} \u00b1 {:#.2f} %'
-                        .format(fraction_hic * 100, hic_stddev * 100))
+            raise RuntimeError('unknown read type {}'.format(arr[i, ix_rt]))
+    return pandas.DataFrame(arr, columns=df.columns)
+
+
+def pvalue_expectation(df: pandas.DataFrame) -> (float, float):
+    """
+    Calculate the mean p-value and variation for Hi-C observations. WGS observations
+    are assigned a p-value of 0.
+    :param df: the dataframe to analyze
+    :return: a dict of p-value mean and standard dev
+    """
+    # get underlying numpy array and column indices
+    arr = df.to_numpy()
+    ix_pval = df.columns.get_loc('pvalue')
+    ix_rt = df.columns.get_loc('read_type')
+    # get the indices of hi-c rows once
+    ix_hic = arr[:, ix_rt] == 'hic'
+    # mean of hi-c pvalues
+    _mean = np.where(ix_hic, 1 - arr[:, ix_pval], 0).mean()
+    # stddev
+    _sd = np.where(ix_hic, arr[:, ix_pval] * (1 - arr[:, ix_pval]), 0).sum()
+    _sd = _sd ** 0.5 / ix_hic.sum()
+    return {'mean': _mean, 'stddev': _sd}
 
 
 def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
@@ -213,8 +230,9 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
     class Counter(object):
-        def __init__(self):
-            self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0}
+        def __init__(self, **extended_fields):
+            self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
+            self.counts.update(extended_fields)
 
         def __getitem__(self, item: str):
             return self.counts[item]
@@ -224,9 +242,13 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
             self.counts[key] = value
 
         def __iadd__(self, other):
-            if not isinstance(other, Counter):
+            if isinstance(other, Counter):
+                _counts = other.counts
+            elif isinstance(other, dict):
+                _counts = other
+            else:
                 raise RuntimeError()
-            for k, v in other.counts.items():
+            for k, v in _counts.items():
                 self.counts[k] += v
             return self
 
@@ -234,19 +256,45 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
             for k, v in _dict.items():
                 self.counts[k] = v
 
+        def analyzed(self) -> int:
+            return self.counts['all'] - self.counts['sample']
+
         def accepted(self) -> int:
-            return self.counts['all'] - self.rejected()
+            return self.analyzed() - self.rejected()
 
         def rejected(self) -> int:
-            return self.counts['sample'] + self.counts['short'] + self.counts['flank']
+            return self.counts['short'] + self.counts['flank'] + self.counts['ambig'] + self.counts['high_cov']
 
-        def fraction(self, key):
-            if key == 'accepted':
-                return self.accepted() / self.counts['all']
-            elif key == 'rejected':
-                return self.rejected() / self.counts['all']
+        def count(self, category: str) -> int:
+            """
+            Return the number of counts in a particular category (analyzed, rejected or ...)
+            :param category: the category
+            :return: the counts of category
+            """
+            if category == 'analyzed':
+                return self.analyzed()
+            elif category == 'rejected':
+                return self.rejected()
+            elif category == 'accepted':
+                return self.accepted()
             else:
-                return self.counts[key] / self.counts['all']
+                return self.counts[category]
+
+        def fraction(self, category: str, against: str = 'analyzed') -> float:
+            """
+            Return the category's fraction compared to one of (accepted, all, analyzed).
+            :param category: the category (numerator)
+            :param against: the denominator
+            :return: a fraction [0,1]
+            """
+            if against == 'accepted':
+                return self.count(category) / self.accepted()
+            elif against == 'all':
+                return self.count(category) / self.counts['all']
+            elif against == 'analyzed':
+                return self.count(category) / self.analyzed()
+            else:
+                raise RuntimeError('parameter \"against\" must be one of [accepted, analyzed or all]')
 
     def next_read(filename: str, site: str, k_size: int,
                   prob_accept: float, progress, counts: Counter) -> (str, Optional[int], str, int):
@@ -269,17 +317,21 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         _sample = 0
         _short = 0
         for _id, _seq, _qual in reader:
+
             _all += 1
             progress.update()
-            seq_len = len(_seq)
-            # skip sequences which are too short to analyze
-            if seq_len < 2 * k_size + site_size + 1:
-                _short += 1
-                continue
+
             # subsampling read-set
             if prob_accept is not None and prob_accept < unif():
                 _sample += 1
                 continue
+
+            # skip sequences which are too short to analyze
+            seq_len = len(_seq)
+            if seq_len < 2 * k_size + site_size + 1:
+                _short += 1
+                continue
+
             # search for the site
             _seq = _seq.upper()
             _ix = _seq.find(site)
@@ -360,12 +412,8 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     unif = random_state.uniform
     randint = random_state.randint
 
-    reads_evaluated = 0
     starts_with_cutsite = 0
     cumulative_length = 0
-    failed_wgs = 0
-    failed_jnc = 0
-    failed_cov = 0
 
     logger.info('Beginning analysis...')
 
@@ -405,12 +453,6 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
                     rtype = 'wgs'
 
-                    # as there are so many non-junction reads, we need to subsample
-                    if unif() > 0.1:
-                        reads_evaluated += 1
-                        cumulative_length += seq_len
-                        continue
-
                     # try to find a randomly selected region which does not contain
                     # ambiguous bases. Skip the read if we fail in a few attempts
                     _attempts = 0
@@ -424,7 +466,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
                     # too many tries occurred, abandon this sequence
                     if _attempts >= 3:
-                        failed_wgs += 1
+                        read_counter.counts['ambig'] += 1
                         continue
 
                 # junction containing reads, categorised as hic for simplicity
@@ -434,17 +476,16 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
                     # abandon this sequence if it contains an N
                     if 'N' in seq[ix - k_size: ix + k_size + junc_size]:
-                        failed_jnc += 1
+                        read_counter.counts['ambig'] += 1
                         continue
 
                 mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size, min_cov=1)
 
                 # avoid regions with pathologically high coverage
                 if mean_outer > max_coverage:
-                    failed_cov += 1
+                    read_counter.counts['high_cov'] += 1
                     continue
 
-                reads_evaluated += 1
                 cumulative_length += seq_len
 
                 # record this observation
@@ -455,25 +496,35 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
             analysis_counter += read_counter
 
-    logger.info('Fraction of rejected reads during parsing: '
-                'sampling {:#.2f}% too_short {:#.2f}% no_flank {:#.2f}%'
-                .format(analysis_counter.fraction('sample') * 100,
-                        analysis_counter.fraction('short') * 100,
-                        analysis_counter.fraction('flank') * 100))
+    #
+    # Reporting
+    #
 
-    # Handle instances where no reads were emitted during parsing.
+    logger.info('Number of parsed reads: {:,}'
+                .format(analysis_counter.counts['all']))
+    logger.info('Number of analyzed reads: {:,} ({:#.4g}% of parsed)'
+                .format(analysis_counter.analyzed(),
+                        analysis_counter.fraction('analyzed', 'all') * 100))
+    logger.info('Number of reads filtered [too short]: {:,} ({:#.4g}% of analyzed)'
+                .format(analysis_counter.count('short'),
+                        analysis_counter.fraction('short') * 100))
+    logger.info('Number of reads filtered [insufficient flanks]: {:,} ({:#.4g}% of analyzed)'
+                .format(analysis_counter.count('flank'),
+                        analysis_counter.fraction('flank') * 100))
+    logger.info('Number of reads filtered [ambiguous sequence]: {:,} ({:#.4g}% of analyzed)'
+                .format(analysis_counter.count('ambig'),
+                        analysis_counter.fraction('ambig') * 100))
+    logger.info('Number of reads filtered [high coverage]: {:,} ({:#.4g}% of analyzed)'
+                .format(analysis_counter.count('high_cov'),
+                        analysis_counter.fraction('high_cov') * 100))
+
+    # handle event that no reads passed through parsing.
     if analysis_counter.accepted() == 0:
         raise InsufficientDataException('No reads were accepted during parsing.')
 
-    logger.info('Fraction of rejected reads during analysis: '
-                'no_junc {:#.2f}%, contains_N {:#.2f}%, high_cov {:#.2}%'
-                .format(failed_wgs / reads_evaluated * 100,
-                        failed_jnc / reads_evaluated * 100,
-                        failed_cov / reads_evaluated * 100))
-
-    # Handle instances were no emitted reads formed useful observations.
-    if len(cov_obs) == 0:
-        raise InsufficientDataException('No reads formed acceptable observations.')
+    logger.info('Number of accepted reads: {:,} ({:#.4g}% of analyzed)'
+                .format(analysis_counter.accepted(),
+                        analysis_counter.fraction('accepted') * 100))
 
     # lets do some tabular munging, making sure that our categories are explicit
     all_df = pandas.DataFrame(cov_obs)
@@ -485,35 +536,63 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     z_outer = all_df.mean_outer == 0
     nz_either = ~(z_inner | z_outer)
     all_df = all_df[nz_either]
-    logger.info('Rows removed with no coverage: inner {}, outer {}, shared {}'.format(
+    logger.info('Rows removed with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
         sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-    all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
-
-    agg_rtype = all_df.groupby('read_type').size()
-    logger.info('Collected observation breakdown. wgs: {:,} junction: {:,}'.format(agg_rtype.wgs, agg_rtype.hic))
-    if agg_rtype.wgs == 0:
+    # check that we have some of by read types
+    count_rtype = all_df.groupby('read_type').size()
+    logger.info('Break down of accepted reads: wgs {:,} junction {:,}'.format(count_rtype.wgs, count_rtype.hic))
+    if count_rtype.wgs == 0:
         raise InsufficientDataException('No reads classified as wgs were observed.')
-    if agg_rtype.hic == 0:
+    if count_rtype.hic == 0:
         raise InsufficientDataException('No reads containing junctions were observed.')
 
-    # the suspected non-hic observations
-    wgs_df = all_df.loc[all_df.read_type == 'wgs'].copy()
-    # we require the table to be in ascending ratio order to assign p-values
-    wgs_df.sort_values('ratio', inplace=True)
-    wgs_df.reset_index(inplace=True, drop=True)
-    wgs_df['pvalue'] = 1.0 / len(wgs_df) * (wgs_df.index + 1)
+    # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
+    all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
+    all_df['pvalue'] = 0
 
-    # the suspected hi-c observations
-    hic_df = all_df.loc[all_df.read_type == 'hic'].copy()
-    hic_df['pvalue'] = None
+    logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
+                .format(starts_with_cutsite,
+                        starts_with_cutsite / analysis_counter.count('accepted') * 100))
+    logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
+                .format(1 / 4 ** lig_info.site_len * 100))
+    logger.info('Number of accepted reads containing the junction sequence: {:,} ({:#.4g}% of accepted)'
+                .format(count_rtype.hic,
+                        count_rtype.hic / analysis_counter.count('accepted') * 100))
+    logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
+                .format(1 / 4 ** lig_info.junc_len * 100))
 
-    all_df = wgs_df.append(hic_df)
-    all_df.sort_values('ratio', inplace=True)
-    all_df.reset_index(inplace=True, drop=True)
+    # calculate the table of empirical p-values
+    uniq_obs = assign_empirical_pvalues_uniq(all_df)
 
-    print_report(hic_df, all_df, lig_info, mean_insert, cumulative_length,
-                 reads_evaluated, starts_with_cutsite)
+    logger.info('Number of unique observations used in empirical p-value: wgs {:,}, hic {:,}'
+                .format(sum(uniq_obs.read_type == 'wgs'), sum(uniq_obs.read_type == 'hic')))
+
+    # estimation hic fraction from empirical p-values
+    hic_frac = pvalue_expectation(distribute_pvalues(uniq_obs))
+
+    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
+                .format(hic_frac['mean'] * 100, hic_frac['stddev'] * 100))
+
+    mean_read_len = cumulative_length / analysis_counter.count('accepted')
+    logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
+
+    if mean_insert is not None:
+        unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
+
+        if unobserved_fraction < 0:
+            unobserved_fraction = 0
+            logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
+                           'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
+                           .format(mean_insert, unobserved_fraction))
+        else:
+            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                        .format(mean_insert, unobserved_fraction))
+            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'
+                        .format(mean_insert))
+            logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} \u00b1 {:#.4g} %'
+                        .format(hic_frac['mean'] * (1 + unobserved_fraction) * 100,
+                                hic_frac['stddev'] * (1 + unobserved_fraction) * 100))
 
     # combine them together
     if output_table is not None:

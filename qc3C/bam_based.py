@@ -82,6 +82,53 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
     return count
 
 
+def greedy_pair_separation(r1: pysam.AlignedSegment, r1ref: int,
+                           r2: pysam.AlignedSegment, r2ref: int,
+                           min_reflen: int) -> Optional[int]:
+    """
+    Greedily try to estimate a distance between pairs, even when they map to different references. The intervening
+    distance is assumed to be the least possible (summing distances of reads from ends of their references)
+    :param r1: read 1
+    :param r1ref: the length of reference to which read 1 is mapped
+    :param r2: read 2
+    :param r2ref: the length of reference to which read 2 is mapped
+    :param min_reflen: the shortest acceptable reference length with which to be greedy
+    :return: an integer distance or None
+    """
+
+    if r1.reference_id != r2.reference_id:
+
+        # only do this for sufficiently long contigs
+        if r1ref < min_reflen or r2ref < min_reflen:
+            return None
+
+        # estimate a distance by looking at the the placement of reads
+        # within their respective contigs. Assume the least possible
+        # intervening distance.
+        r1_left = r1.pos
+        r1_right = r1ref - (r1.pos + r1.alen)
+        r1_d = min(r1_left, r1_right)
+
+        r2_left = r2.pos
+        r2_right = r2ref - (r2.pos + r2.alen)
+        r2_d = min(r2_left, r2_right)
+
+        d = r1_d + r2_d
+
+        # for greedy pairs, we require that at least one read map
+        # the full distance from its nearest end, otherwise return None
+        if d >= 10000 and r1_d < 10000 > r2_d:
+            d = None
+        elif d >= 5000 and r1_d < 5000 > r2_d:
+            d = None
+        elif d >= 1000 and r1_d < 1000 > r2_d:
+            d = None
+        return d
+    else:
+        # regular cis-mapping separation
+        return pair_separation(r1, r2)
+
+
 def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment) -> Optional[int]:
     """
     Determine the separation between R1 and R2, where the distance is measured from the beginning of each
@@ -105,16 +152,13 @@ def pair_separation(r1: pysam.AlignedSegment, r2: pysam.AlignedSegment) -> Optio
 
         d = abs(x2 - x1)
 
-        # only consider situations where separation of start-points is a positive quantity
+        # TODO check if this still makes any difference. We originally had this test
+        #  because we were taking the absolute value, where it was negative distances
+        #  that were the greater problem.
         if d > 0:
             return d
-        # elif d == 0:
-        #     print(r1)
-        #     print(r2)
-        #     print(x1, x2, r1rev, r2rev)
-        #     raise NotImplemented()
-
-    return None
+        else:
+            return None
 
 
 class Counter(ABC):
@@ -346,6 +390,7 @@ class read_pairs(object):
         self.show_progress = show_progress
         self.progress = None
         self.is_ipynb = is_ipynb
+        self.reference_lengths = np.array([li for li in self.bam.lengths])
 
         # applying sample_rate to reads means that the pass rate of pairs has an upper bound of sample_rate ** 2.
         # therefore take the square, so that the number of pairs is closer to what users expect.
@@ -356,7 +401,7 @@ class read_pairs(object):
             pair_sample_rate = None
 
         self.read_filter = ReadFilter(pair_sample_rate, min_mapq, min_reflen, min_match, no_secondary, no_supplementary,
-                                      no_refterm, np.array([li for li in self.bam.lengths]), random_state)
+                                      no_refterm, self.reference_lengths, random_state)
         self.pair_filter = PairFilter(no_trans=no_trans)
 
         self.bam_iter = self.bam.fetch(until_eof=True)
@@ -369,6 +414,15 @@ class read_pairs(object):
 
     def __enter__(self):
         return self
+
+    def get_reflen(self, r: pysam.AlignedSegment) -> int:
+        """
+        Return the complete length of the reference sequence on which a read has been aligned. This method
+        assumes the read is mapped.
+        :param r: the read in question
+        :return: the length of the reference
+        """
+        return self.reference_lengths[r.reference_id]
 
     def close(self) -> None:
         if self.bam is not None:
@@ -478,8 +532,8 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         short_count = 0
         long_counts = np.zeros(3, dtype=np.int)
         long_bins = (1000, 5000, 10000)
-        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0}
-        enzyme_counts = {enz: {'cs_full': 0, 'cs_term': 0, 'read_thru': 0,
+        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0, 'sep_obs': 0}
+        enzyme_counts = {enz: {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
                                'is_split': 0, 'partial_readthru': 0} for enz in enzymes}
 
         # begin with user supplied median estimate
@@ -489,35 +543,36 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         for r1, r2 in pair_parser:
 
-            # for cis-pairs, determine their separation
-            if r1.reference_id == r2.reference_id:
+            d = greedy_pair_separation(r1, pair_parser.get_reflen(r1),
+                                       r2, pair_parser.get_reflen(r2),
+                                       1000)
 
-                d = pair_separation(r1, r2)
+            # cis-mapping, well mapped pairs
+            if d is not None:
 
-                # cis-mapping, well mapped pairs
-                if d is not None:
+                pair_counts['sep_obs'] += 1
 
-                    # track the number of pairs observed for the requested separation distances
-                    if d >= long_bins[2]:
-                        long_counts[2] += 1
-                        long_counts[1] += 1
-                        long_counts[0] += 1
-                    elif d >= long_bins[1]:
-                        long_counts[1] += 1
-                        long_counts[0] += 1
-                    elif d >= long_bins[0]:
-                        long_counts[0] += 1
+                # track the number of pairs observed for the requested separation distances
+                if d >= long_bins[2]:
+                    long_counts[2] += 1
+                    long_counts[1] += 1
+                    long_counts[0] += 1
+                elif d >= long_bins[1]:
+                    long_counts[1] += 1
+                    long_counts[0] += 1
+                elif d >= long_bins[0]:
+                    long_counts[0] += 1
 
-                    # keep a count of those pairs which are within the "WGS" region
-                    elif 50 < d < 1000:
-                        short_sum += d
-                        short_count += 1
+                # keep a count of those pairs which are within the "WGS" region
+                elif r1.reference_id == r2.reference_id and 50 < d < 1000:
+                    short_sum += d
+                    short_count += 1
 
-                        # frugal median estimator
-                        if short_median_est > d:
-                            short_median_est -= 1
-                        elif short_median_est < d:
-                            short_median_est += 1
+                    # frugal median estimator
+                    if short_median_est > d:
+                        short_median_est -= 1
+                    elif short_median_est < d:
+                        short_median_est += 1
 
             # extract some QC statistics from the reads in both cis and trans pairs,
             for ri in [r1, r2]:
@@ -544,6 +599,8 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     # check for cut-site
                     _no_site = True
                     for enz, lig_info in ligation_variants.items():
+                        if seq.startswith(lig_info.cut_site):
+                            enzyme_counts[enz]['cs_start'] += 1
                         if seq.endswith(lig_info.vestigial):
                             _no_site = False
                             enzyme_counts[enz]['cs_full'] += 1
@@ -561,6 +618,9 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     # check for cut-site and potentially the junction
                     _no_site = True
                     for enz, lig_info in ligation_variants.items():
+
+                        if seq.startswith(lig_info.cut_site):
+                            enzyme_counts[enz]['cs_start'] += 1
 
                         max_match = lig_info.junc_len - lig_info.vest_len
 
@@ -700,18 +760,21 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         # per-enzyme statistics
         for enz, counts in enzyme_counts.items():
-            logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
+            logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.2f}%)'
                         .format(enz,
-                                1 / 4 ** ligation_variants[enz].vest_len * 100))
+                                counts['cs_start'],
+                                counts['cs_start'] / pair_counts['total']*100))
             logger.info('For {}, cut-site {} has remnant {}'
                         .format(enz,
                                 ligation_variants[enz].elucidation,
                                 ligation_variants[enz].vestigial))
+            logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
+                        .format(enz,
+                                1 / 4 ** ligation_variants[enz].vest_len * 100))
             logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.2f}%)'
                         .format(enz,
                                 counts['cs_term'],
                                 counts['cs_term'] / pair_counts['total']*100))
-
             logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.2f}%)'
                         .format(enz,
                                 counts['cs_full'],
@@ -740,7 +803,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
             for _tag, _frac in unobs_frac.items():
                 if _frac is None:
-                    logger.info('For {} there was insufficient {} data,     no adjustment could be made to Hi-C fraction'
+                    logger.info('For {} there was insufficient {} data, no adjustment could be made to Hi-C fraction'
                                 .format(enz, _tag))
                     continue
 
@@ -752,13 +815,13 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         # long-range bin counts, with formatting to align fields
         field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
-        logger.info('Long-range distance intervals:  {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
+        logger.info('Long-range distance intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
                     .format(*long_bins,
                             w=field_width))
-        logger.info('Number of cis-mapping pairs:    {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
+        logger.info('Number of observed pairs:      {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
                     .format(*long_counts,
                             w=field_width))
-        frac = long_counts.astype(np.float) / pair_parser.pair_filter.cis_count()
-        logger.info('Relative fraction of all cis:  {:#.4g},   {:#.4g},   {:#.4g}'
+        frac = long_counts.astype(np.float) / pair_counts['sep_obs']
+        logger.info('Relative fraction of all obs:   {:#.4g},   {:#.4g},   {:#.4g}'
                     .format(*frac,
                             w=field_width))
