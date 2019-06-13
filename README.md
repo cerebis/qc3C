@@ -66,16 +66,18 @@ docker run cerebis/qc3c:alpine jellyfish
 
 ### Using qc3C
 
-#### Bam mode
+#### Creating the mode-dependent analysis target
+
+##### A BAM file for QC analysis
 The bam analysis mode requires that Hi-C reads are first mapped to a reference, preferably the same genome as was used in producing the Hi-C library. The reference can be in the form of a closed genome or assembly contigs. We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`.
 
-To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference
+To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference. (_Note: we opt to filter-out certain reads which will not be used in the QC analysis._)
 
 ```$bash
 bwa mem -5SP contigs.fa hic_reads.fq | samtools view -F 0x904 -bS - | samtools sort -n -o hic_to_ref.bam -
 ```
 
-#### K-mer mode 
+##### A k-mer library for QC analysis
 As a reference sequence is not necessary available at QC time, a second k-mer based approach is provided. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to externally generate the k-mer library and Jellyfish's Python hooks internally during analysis.
 
 From a Hi-C read-set, a Jellyfish k-mer library of size 24 could be generated as follows:
@@ -84,22 +86,26 @@ From a Hi-C read-set, a Jellyfish k-mer library of size 24 could be generated as
 jellyfish count -m 24 -s 2G -C -o 24mers.jf hic_reads.fq 
 ```
 
-In either case, qc3C searches for evidence of proximity ligations to infer whether or not a generated library contains strong signal. Used after performing a small assessment sequencing run, this information allows researchers to choose to a full sequencing run that is more or less deep, or abandon a library entirely. 
+#### Running a QC analysis
+
+In either mode, qc3C searches for evidence of proximity ligations to infer whether or not a generated library contains strong signal. Used after performing a small assessment sequencing run, this information allows researchers to choose to a full sequencing run that is more or less deep, or abandon a library entirely. 
+
+For large data-sets, analysing the entire contents is likely unnecessary and we recommend looking at only subsample of observations using the `--sample-rate|-p` option. As little as 5% (`-p 0.05`) may be sufficient if there are millions of reads in your chosen dataset.  
 
 Example usage for a library which used both Sau3AI and MluCI restriction enzymes
 
-**BAM mode**
+##### BAM mode
 ```$bash
 > qc3C bam --mean-insert 500 -enzyme Sau3AI --enzyme MluCI --bam hic_to_ref.bam
 
 ```
-**Kmer mode**
+##### Kmer mode
 ```$bash
 > qc3C kmer --mean-insert 500 -enzyme Sau3AI --reads hic_reads.fq --lib 24mers.jf
 ```
 
 
-**Command help**
+### Command line help
 
 ```$bash
 usage: qc3C [-h] [-V] {bam,kmer} ...
