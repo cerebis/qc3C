@@ -2,11 +2,11 @@
 
 qc3C attempts to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library. That is, read-pairs which are a true product of proximity ligation, rather than self-religation or shotgun noise. To accomplish this, two modes of analysis are available: BAM analysis and assembly-free kmer analysis. 
 
-###Installation
+### Installation
 
 Installing qc3C can be accomplished directly from Github using Pip or installation can be avoided by use of Docker or Singularity. One complication of the Pip based installation is that the supporting tool Jellyfish, which also provides a required Python module, must be installed separately.
 
-####Installing Jellyfish
+#### Installing Jellyfish
 
 From a working directory of your choosing:
 
@@ -24,30 +24,25 @@ _Note: Since qc3C is written exclusively for Python 3, we explicitly invoke a py
 ```bash
 # Step 1
 wget https://github.com/gmarcais/Jellyfish/releases/download/v2.2.10/jellyfish-2.2.10.tar.gz 
-
 # Step 2
 tar xzf jellyfish-2.2.10.tar.gz && cd jellyfish-2.2.10
-
 # Step 3
 export PKG_CONFIG_PATH=$PWD:$PKG_CONFIG_PATH
-
 # Step 4
 ./configure && make && make install
-
 # Step 5
 cd swig/python
-
 # Step 6
 python3 setup.py build && python3 setup.py install
 ```
 
-####Installing qc3C using Pip
+#### Installing qc3C using Pip
 ```bash
 pip3 install git+https://github.com/cerebis/qc3C
 ```
 
 
-####Using Docker the image
+#### Using Docker the image
 
 We maintain an update to date image of qc3C on Dockerhub. The image also includes a working installation of Jellyfish. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
 
@@ -65,13 +60,13 @@ After successfully obtaining the image, qc3C or Jellyfish can be run as follows 
 # show qc3C help
 docker run cerebis/qc3c:alpine qc3C -h
 
-#  show jellyfish --help
+# show jellyfish --help
 docker run cerebis/qc3c:alpine jellyfish
 ```
 
-###Using qc3C
+### Using qc3C
 
-####Bam mode
+#### Bam mode
 The bam analysis mode requires that Hi-C reads are first mapped to a reference, preferably the same genome as was used in producing the Hi-C library. The reference can be in the form of a closed genome or assembly contigs. We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`.
 
 To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference
@@ -80,7 +75,7 @@ To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference
 bwa mem -5SP contigs.fa hic_reads.fq | samtools view -F 0x904 -bS - | samtools sort -n -o hic_to_ref.bam -
 ```
 
-####K-mer mode 
+#### K-mer mode 
 As a reference sequence is not necessary available at QC time, a second k-mer based approach is provided. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to externally generate the k-mer library and Jellyfish's Python hooks internally during analysis.
 
 From a Hi-C read-set, a Jellyfish k-mer library of size 24 could be generated as follows:
