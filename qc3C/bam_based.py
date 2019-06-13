@@ -400,8 +400,9 @@ class read_pairs(object):
         else:
             pair_sample_rate = None
 
-        self.read_filter = ReadFilter(pair_sample_rate, min_mapq, min_reflen, min_match, no_secondary, no_supplementary,
-                                      no_refterm, self.reference_lengths, random_state)
+        self.read_filter = ReadFilter(pair_sample_rate, min_mapq, min_reflen, min_match,
+                                      no_secondary, no_supplementary, no_refterm,
+                                      self.reference_lengths, random_state)
         self.pair_filter = PairFilter(no_trans=no_trans)
 
         self.bam_iter = self.bam.fetch(until_eof=True)
@@ -493,7 +494,8 @@ def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: Ligati
 
 
 def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, min_mapq: int = 60, threads: int = 1) -> None:
+            sample_rate: float = None, min_mapq: int = 60, threads: int = 1,
+            num_obs: int = None) -> None:
     """
     Analyze a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
     This method attempts to assess details which indicate the overall strength of the
@@ -507,6 +509,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
     :param sample_rate: consider only a portion of all pairs [0..1]
     :param min_mapq: the minimum acceptable mapping quality
     :param threads: the number of threads used in accessing the bam file
+    :param num_obs: the number of observations to collect before rendering report
     """
 
     ligation_variants = {}
@@ -527,6 +530,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
                     threads=threads, count_reads=True, show_progress=True) as pair_parser:
 
+        obs_count = 0
         cumulative_length = 0
         short_sum = 0
         short_count = 0
@@ -651,64 +655,65 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     if _no_site:
                         pair_counts['no_site'] += 1
 
+
         """
         Report the results
         """
 
         logger.info('Number of parsed reads: {:,}'
                     .format(pair_parser.read_filter.counts['all']))
-        logger.info('Number of analysed reads: {:,} ({:#.2f}% of all)'
+        logger.info('Number of analysed reads: {:,} ({:#.4g}% of all)'
                     .format(pair_parser.read_filter.analyzed(),
                             pair_parser.read_filter.fraction('analyzed', 'all')*100))
-        logger.info('Number of reads filtered [unmapped]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [unmapped]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['unmapped'],
                             pair_parser.read_filter.fraction('unmapped')*100))
-        logger.info('Number of reads filtered [low mapq]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [low mapq]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['mapq'],
                             pair_parser.read_filter.fraction('mapq')*100))
-        logger.info('Number of reads filtered [ref length]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [ref length]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['ref_len'],
                             pair_parser.read_filter.fraction('ref_len')*100))
-        logger.info('Number of reads filtered [secondary]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [secondary]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['secondary'],
                             pair_parser.read_filter.fraction('secondary')*100))
-        logger.info('Number of reads filtered [supplementary]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [supplementary]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['supplementary'],
                             pair_parser.read_filter.fraction('supplementary')*100))
-        logger.info('Number of reads filtered [weak mapping]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [weak mapping]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['weak'],
                             pair_parser.read_filter.fraction('weak')*100))
-        logger.info('Number of reads filtered [ref terminated]: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of reads filtered [ref terminated]: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.counts['ref_term'],
                             pair_parser.read_filter.fraction('ref_term')*100))
 
         # accepted reads
-        logger.info('Number of accepted reads: {:,} ({:#.2f}% of analyzed)'
+        logger.info('Number of accepted reads: {:,} ({:#.4g}% of analyzed)'
                     .format(pair_parser.read_filter.count('accepted'),
                             pair_parser.read_filter.fraction('accepted')*100))
 
         # for pairs which have accepted read filtration stage
         logger.info('Number of pairs resulting from accepted read pool: {:,}'
                     .format(pair_parser.pair_filter.analyzed()))
-        logger.info('Number of pairs trans-mapping: {:,} ({:#.2f}% of pairs)'
+        logger.info('Number of pairs trans-mapping: {:,} ({:#.4g}% of pairs)'
                     .format(pair_parser.pair_filter.counts['trans'],
                             pair_parser.pair_filter.fraction('trans')*100))
-        logger.info('Number of pairs cis-mapping: {:,} ({:.2f}% of pairs)'
+        logger.info('Number of pairs cis-mapping: {:,} ({:#.4g}% of pairs)'
                     .format(pair_parser.pair_filter.cis_count(),
                             pair_parser.pair_filter.fraction('cis')*100))
 
-        logger.info('Number of paired reads that fully align: {:,} ({:#.2f}% of paired)'
+        logger.info('Number of paired reads that fully align: {:,} ({:#.4g}% of paired)'
                     .format(pair_counts['full_align'],
                             pair_counts['full_align'] / pair_counts['total']*100))
-        logger.info('Number of paired reads whose alignment terminates early: {:,} ({:#.2f}% of paired)'
+        logger.info('Number of paired reads whose alignment terminates early: {:,} ({:#.4g}% of paired)'
                     .format(pair_counts['early_term'],
                             pair_counts['early_term'] / pair_counts['total']*100))
         # TODO this can probably be dropped.
-        logger.info('Number of paired reads not ending in cut-site remnant: {:,} ({:#.2f}% of paired)'
+        logger.info('Number of paired reads not ending in cut-site remnant: {:,} ({:#.4g}% of paired)'
                     .format(pair_counts['no_site'],
                             pair_counts['no_site'] / pair_counts['total']*100))
 
-        logger.info('Number of short-range cis-mapping pairs: {:,} ({:#.2f}% of cis)'
+        logger.info('Number of short-range cis-mapping pairs: {:,} ({:#.4g}% of cis)'
                     .format(short_count,
                             short_count / pair_parser.pair_filter.cis_count()*100))
 
@@ -760,7 +765,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         # per-enzyme statistics
         for enz, counts in enzyme_counts.items():
-            logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['cs_start'],
                                 counts['cs_start'] / pair_counts['total']*100))
@@ -771,32 +776,32 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
             logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
                         .format(enz,
                                 1 / 4 ** ligation_variants[enz].vest_len * 100))
-            logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['cs_term'],
                                 counts['cs_term'] / pair_counts['total']*100))
-            logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['cs_full'],
                                 counts['cs_full'] / pair_counts['total']*100))
 
             delta_cs = counts['cs_term'] - counts['cs_full']
-            logger.info('For {}, upper bound of read-thru events: {:,} ({:#.2f}%)'
+            logger.info('For {}, upper bound of read-thru events: {:,} ({:#.4g}%)'
                         .format(enz,
                                 delta_cs,
                                 delta_cs / pair_counts['total']*100))
 
-            logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['partial_readthru'],
                                 counts['partial_readthru'] / pair_counts['total']*100))
 
             p_obs = counts['read_thru'] / pair_counts['total']
-            logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['read_thru'],
                                 p_obs*100))
-            logger.info('For {}, number of paired reads with read-thru and split alignment: {:,} ({:#.2f}%)'
+            logger.info('For {}, number of paired reads with read-thru and split alignment: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['is_split'],
                                 counts['is_split'] / pair_counts['total']*100))
@@ -808,7 +813,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     continue
 
                 p_ub = delta_cs / pair_counts['total']
-                logger.info('For {} based on {} data, adjusted estimation of Hi-C fraction: ({:#.2f}-{:#.2f}%)'
+                logger.info('For {} based on {} data, adjusted estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
                             .format(enz, _tag,
                                     (p_obs + p_obs * _frac) * 100,
                                     (p_ub + p_ub * _frac) * 100))

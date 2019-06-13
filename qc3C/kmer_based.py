@@ -9,7 +9,7 @@ import logging
 from collections import namedtuple
 from typing import TextIO, Optional
 from qc3C.exceptions import InsufficientDataException
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
+from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, test_for_exe
 
 try:
@@ -186,7 +186,8 @@ def pvalue_expectation(df: pandas.DataFrame) -> (float, float):
 
 
 def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, max_coverage: int = 500, threads: int = 1, output_table: str = None) -> None:
+            sample_rate: float = None, max_coverage: int = 500, threads: int = 1,
+            output_table: str = None, num_obs: int = None) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -200,6 +201,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     :param max_coverage: ignore kmers with coverage greater than this value
     :param threads: use additional threads for supported steps
     :param output_table: if not None, write the full pandas table to the specified path
+    :param num_obs: the number of observations to collect before rendering report
     """
 
     def collect_coverage(seq: str, ix: int, site_size: int, k: int, min_cov: int = 0) -> (float, float):
