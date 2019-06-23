@@ -18,11 +18,6 @@ RUN apk add --no-cache --update-cache \
   xz-dev \
   zlib-dev
 
-# install qc3C and dependencies in required order
-RUN pip3 install cython && \
-  pip3 install numpy && \
-  pip3 install git+https://github.com/cerebis/qc3C
-
 # install supporting binaries and python hooks
 WORKDIR /usr/local
 RUN wget https://github.com/gmarcais/Jellyfish/releases/download/v2.2.10/jellyfish-2.2.10.tar.gz && tar xzf jellyfish-2.2.10.tar.gz
@@ -39,6 +34,14 @@ WORKDIR /usr/local/
 RUN wget https://github.com/samtools/samtools/releases/download/1.9/samtools-1.9.tar.bz2 && tar xjf samtools-1.9.tar.bz2
 WORKDIR /usr/local/samtools-1.9
 RUN make
+
+# install qc3C and dependencies in required order
+RUN pip3 install cython && pip3 install numpy
+RUN pip3 install "pandas==0.24.2"
+
+#COPY data/qc3C-0.2.6.1.tar.gz /usr/local/
+#RUN pip3 install /usr/local/qc3C-0.2.6.1.tar.gz
+RUN pip3 install git+https://github.com/cerebis/qc3C
 
 FROM python:3-alpine
 WORKDIR /usr/local

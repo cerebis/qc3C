@@ -60,6 +60,11 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
     assert exe_exists('wc'), 'required tool wc was not found on path'
     assert not (paired and mapped), 'Cannot set paired and mapped simultaneously'
 
+    if not os.path.exists(file_name):
+        raise IOError('{} does not exist'.format(file_name))
+    if not os.path.isfile(file_name):
+        raise IOError('{} is not a file'.format(file_name))
+
     opts = ['samtools', 'view', '-c']
     if max_cpu > 1:
         max_cpu = multiprocessing.cpu_count()
@@ -76,10 +81,15 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
 
     proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    count = int(proc.stdout.readline())
-    if paired and count % 2 != 0:
-        logger.warning('When counting paired reads, the total was not divisible by 2.')
-    return count
+    try:
+        value_txt = proc.stdout.readline().strip()
+        count = int(value_txt)
+        if paired and count % 2 != 0:
+            logger.warning('When counting paired reads, the total was not divisible by 2.')
+        return count
+    except ValueError:
+        raise RuntimeError('Encountered a problem determining alignment count. samtools returned [{}]'
+                           .format(value_txt))
 
 
 def greedy_pair_separation(r1: pysam.AlignedSegment, r1ref: int,
