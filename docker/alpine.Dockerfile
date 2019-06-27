@@ -25,7 +25,6 @@ WORKDIR /usr/local/jellyfish-2.2.10
 RUN ./configure && make && make install
 WORKDIR /usr/local/jellyfish-2.2.10/swig/python
 RUN export PKG_CONFIG_PATH=/usr/local/jellyfish-2.2.10 && python3 setup.py build && python3 setup.py install
-WORKDIR /home
 WORKDIR /usr/local
 RUN wget https://github.com/samtools/htslib/releases/download/1.9/htslib-1.9.tar.bz2 && tar xjf htslib-1.9.tar.bz2
 WORKDIR /usr/local/htslib-1.9
