@@ -66,7 +66,7 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
         raise IOError('{} is not a file'.format(file_name))
 
     opts = ['samtools', 'view', '-c']
-    if max_cpu > 1:
+    if max_cpu is None:
         max_cpu = multiprocessing.cpu_count()
     opts.append('-@{}'.format(max_cpu))
 
@@ -81,8 +81,8 @@ def count_bam_reads(file_name: str, paired: bool = False, mapped: bool = False,
 
     proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    value_txt = proc.stdout.readline().strip()
     try:
-        value_txt = proc.stdout.readline().strip()
         count = int(value_txt)
         if paired and count % 2 != 0:
             logger.warning('When counting paired reads, the total was not divisible by 2.')
