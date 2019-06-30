@@ -546,7 +546,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         short_count = 0
         long_counts = np.zeros(3, dtype=np.int)
         long_bins = (1000, 5000, 10000)
-        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0, 'sep_obs': 0}
+        pair_counts = {'total': 0, 'full_align': 0, 'early_term': 0, 'no_site': 0, 'separation': 0}
         enzyme_counts = {enz: {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
                                'is_split': 0, 'partial_readthru': 0} for enz in enzymes}
 
@@ -564,7 +564,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
             # cis-mapping, well mapped pairs
             if d is not None:
 
-                pair_counts['sep_obs'] += 1
+                pair_counts['separation'] += 1
 
                 # track the number of pairs observed for the requested separation distances
                 if d >= long_bins[2]:
@@ -836,7 +836,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         logger.info('Number of observed pairs:      {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
                     .format(*long_counts,
                             w=field_width))
-        frac = long_counts.astype(np.float) / pair_counts['sep_obs']
+        frac = long_counts.astype(np.float) / pair_counts['separation']
         logger.info('Relative fraction of all obs:   {:#.4g},   {:#.4g},   {:#.4g}'
                     .format(*frac,
                             w=field_width))

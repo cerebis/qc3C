@@ -7,7 +7,7 @@ import gzip
 import logging
 
 from collections import namedtuple
-from typing import TextIO, Optional
+from typing import TextIO, Optional, Dict
 from qc3C.exceptions import InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, test_for_exe
@@ -164,25 +164,23 @@ def distribute_pvalues(df: pandas.DataFrame) -> pandas.DataFrame:
     return pandas.DataFrame(arr, columns=df.columns)
 
 
-def pvalue_expectation(df: pandas.DataFrame) -> (float, float):
+def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     """
     Calculate the mean p-value and variation for Hi-C observations. WGS observations
     are assigned a p-value of 0.
     :param df: the dataframe to analyze
-    :return: a dict of p-value mean and standard dev
+    :return: a tuple of p-value mean and error
     """
-    # get underlying numpy array and column indices
-    arr = df.to_numpy()
-    ix_pval = df.columns.get_loc('pvalue')
-    ix_rt = df.columns.get_loc('read_type')
-    # get the indices of hi-c rows once
-    ix_hic = arr[:, ix_rt] == 'hic'
-    # mean of hi-c pvalues
-    _mean = np.where(ix_hic, 1 - arr[:, ix_pval], 0).mean()
-    # stddev
-    _sd = np.where(ix_hic, arr[:, ix_pval] * (1 - arr[:, ix_pval]), 0).sum()
-    _sd = _sd ** 0.5 / ix_hic.sum()
-    return {'mean': _mean, 'stddev': _sd}
+    # number of total observations
+    N = len(df)
+    # Hi-C q = 1 - p-value
+    q = 1 - df.loc[df.read_type == 'hic', 'pvalue'].to_numpy(np.float)
+
+    # mean value and error
+    _mean = q.sum() / N
+    _err = np.sqrt((q * (1-q)).sum()) / N
+
+    return {'mean': _mean, 'error': _err}
 
 
 def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
@@ -574,7 +572,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     hic_frac = pvalue_expectation(distribute_pvalues(uniq_obs))
 
     logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
-                .format(hic_frac['mean'] * 100, hic_frac['stddev'] * 100))
+                .format(hic_frac['mean'] * 100, hic_frac['error'] * 100))
 
     mean_read_len = cumulative_length / analysis_counter.count('accepted')
     logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
@@ -594,7 +592,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
                         .format(mean_insert))
             logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} \u00b1 {:#.4g} %'
                         .format(hic_frac['mean'] * (1 + unobserved_fraction) * 100,
-                                hic_frac['stddev'] * (1 + unobserved_fraction) * 100))
+                                hic_frac['error'] * (1 + unobserved_fraction) * 100))
 
     # combine them together
     if output_table is not None:
