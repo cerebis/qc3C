@@ -11,6 +11,8 @@ from typing import TextIO, Optional, Dict
 from qc3C.exceptions import InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, test_for_exe
+import jelly
+import io
 
 try:
     import dna_jellyfish
@@ -229,6 +231,33 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
             sliding_cov[i] = k_cov
         return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
 
+    def collect_coverage_pybind(seq: str, ix: int, site_size: int, k: int, min_cov: int = 0) -> (float, float):
+        """
+        Collect the k-mer coverage centered around the position ix. From the left, the sliding
+        window begins just before the site region and slides right until just after. Means
+        are then calculated for the inner (within the junction) and outer (left and right flanks)
+        :param seq: the sequence to analyze
+        :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
+        :param site_size: the size of the junction site
+        :param k: the kmer size
+        :param min_cov: apply a minimum value to coverage reported by jellyfish.
+        :return: mean(inner), mean(outer)
+        """
+        assert k <= ix <= len(seq) - (k + site_size), \
+            'The site index {} is either too close to start (min {}) or ' \
+            'end (max {}) of read to scan for coverage'.format(ix, k, len(seq) - (k + site_size))
+
+        sliding_cov = np.zeros(shape=k+site_size+1, dtype=np.int)
+        for i in range(-k, site_size+1):
+            smer = seq[ix+i:ix+i+k]
+            mer = jelly.MerDNA(smer)
+            mer.canonicalize()
+            k_cov = query_jelly[mer]
+            if k_cov < min_cov:
+                k_cov = min_cov
+            sliding_cov[i] = k_cov
+        return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
+
     class Counter(object):
         def __init__(self, **extended_fields):
             self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
@@ -385,8 +414,9 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         sample_rate = None
 
     # initialize jellyfish API
-    dna_jellyfish.MerDNA_k(k_size)
-    query_jf = dna_jellyfish.QueryMerFile(kmer_db)
+    # dna_jellyfish.MerDNA_k(k_size)
+    # query_jf = dna_jellyfish.QueryMerFile(kmer_db)
+    query_jelly = jelly.QueryMerFile(kmer_db)
 
     OUTER_IX = np.array([True] * (flank_size+2) +
                         [False] * (junc_size*2 + 1 - 4) +
@@ -479,7 +509,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
                         read_counter.counts['ambig'] += 1
                         continue
 
-                mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size, min_cov=1)
+                mean_inner, mean_outer = collect_coverage_pybind(seq, ix, junc_size, k_size, min_cov=1)
 
                 # avoid regions with pathologically high coverage
                 if mean_outer > max_coverage:
