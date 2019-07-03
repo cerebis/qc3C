@@ -1,3 +1,4 @@
+import json
 import logging
 import numpy as np
 import os
@@ -57,3 +58,20 @@ def init_random_state(seed: int = None) -> np.random.RandomState:
     else:
         logger.info('Random seed was {}'.format(seed))
     return np.random.RandomState(seed)
+
+
+def write_jsonline(fpath: str, obj):
+    """
+    Append an object to a JSON Lines format file. (newline delimited json)
+    :param fpath: the file path to open for writing
+    :param obj: the object to write
+    """
+    def default(o):
+        if isinstance(o, np.int64):
+            return int(o)
+        elif isinstance(o, np.float64):
+            return float(o)
+        raise TypeError(o.__class__)
+
+    with open(fpath, 'at+') as fp:
+        print(json.dumps(obj, default=default), file=fp)

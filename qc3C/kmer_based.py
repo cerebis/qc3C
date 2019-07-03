@@ -1,16 +1,16 @@
-import numpy as np
-import tqdm
-import pandas
-import subprocess
 import bz2
 import gzip
+import numpy as np
+import pandas
+import subprocess
+import tqdm
 import logging
 
 from collections import namedtuple
 from typing import TextIO, Optional, Dict
 from qc3C.exceptions import InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
-from qc3C.utils import init_random_state, test_for_exe
+from qc3C.utils import init_random_state, test_for_exe, write_jsonline
 
 try:
     import dna_jellyfish
@@ -113,6 +113,38 @@ def count_fastq_sequences(file_name: str, max_cpu: int = 1) -> int:
     return n
 
 
+def assign_empirical_pvalues_all(df):
+    """
+    For a combined wgs/hic dataframe, assign a ranked p-value on ascending ratio using
+    only the wgs observations. Afterwards, distribute these to hic based on their
+    order in the ascending table.
+
+    :param df: the dataframe to assign pvalues
+    :return: a new 3-column dataframe ready for pvalue distribution
+    """
+    # ascending ratio order
+    df = df.sort_values('ratio')
+    # extract just the relevant columns as a numpy array
+    _cols = ('read_type', 'ratio', 'pvalue')
+    wgs_obs = df.loc[df.read_type=='wgs', _cols].to_numpy()
+    # assign p-values overall, only incrementing when the ratio changes
+    n, N = 1, wgs_obs.shape[0]
+    last_ratio = wgs_obs[0, 1]
+    wgs_obs[0, 2] = n/N
+    for i in range(1, N):
+        if wgs_obs[i, 1] != last_ratio:
+            n += 1
+        last_ratio = wgs_obs[i, 1]
+        wgs_obs[i, 2] = n/N
+    # reconstruct a dataframe for convenience, stacking the wgs and hic obs together
+    df = pandas.DataFrame(np.vstack([wgs_obs, df.loc[df.read_type=='hic', _cols].to_numpy()]),
+                          columns=['read_type', 'ratio', 'pvalue'])
+    # resort as the hic obs need to be reintegrated at their proper location
+    df.sort_values('ratio', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return distribute_pvalues(df)
+
+
 def assign_empirical_pvalues_uniq(df: pandas.DataFrame) -> pandas.DataFrame:
     """
     Taking in a mixed DataFrame containing both wgs and hic observations, assign empirical
@@ -185,7 +217,7 @@ def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
 
 def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_coverage: int = 500, threads: int = 1,
-            output_table: str = None, num_obs: int = None) -> None:
+            output_table: str = None, report_path: str = None, num_obs: int = None) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
     of proximity junctions.
@@ -199,6 +231,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     :param max_coverage: ignore kmers with coverage greater than this value
     :param threads: use additional threads for supported steps
     :param output_table: if not None, write the full pandas table to the specified path
+    :param report_path: append a report in single-line JSON format to the given path.
     :param num_obs: the number of observations to collect before rendering report
     """
 
@@ -499,6 +532,14 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     #
     # Reporting
     #
+    report = {
+        'n_parsed': analysis_counter.counts['all'],
+        'n_analyzed': analysis_counter.analyzed(),
+        'n_short': analysis_counter.count('short'),
+        'n_noflank': analysis_counter.count('flank'),
+        'n_ambiguous': analysis_counter.count('ambig'),
+        'n_highcov': analysis_counter.count('high_cov'),
+    }
 
     logger.info('Number of parsed reads: {:,}'
                 .format(analysis_counter.counts['all']))
@@ -518,92 +559,107 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
                 .format(analysis_counter.count('high_cov'),
                         analysis_counter.fraction('high_cov') * 100))
 
-    # handle event that no reads passed through parsing.
-    if analysis_counter.accepted() == 0:
-        raise InsufficientDataException('No reads were accepted during parsing.')
+    try:
+        # handle event that no reads passed through parsing.
+        if analysis_counter.accepted() == 0:
+            raise InsufficientDataException('No reads were accepted during parsing.')
 
-    logger.info('Number of accepted reads: {:,} ({:#.4g}% of analyzed)'
-                .format(analysis_counter.accepted(),
-                        analysis_counter.fraction('accepted') * 100))
+        report['n_accepted'] = analysis_counter.accepted()
+        logger.info('Number of accepted reads: {:,} ({:#.4g}% of analyzed)'
+                    .format(analysis_counter.accepted(),
+                            analysis_counter.fraction('accepted') * 100))
 
-    # lets do some tabular munging, making sure that our categories are explicit
-    all_df = pandas.DataFrame(cov_obs)
-    # make read_type categorical so we will always see values for both when counting
-    all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
+        # lets do some tabular munging, making sure that our categories are explicit
+        all_df = pandas.DataFrame(cov_obs)
+        # make read_type categorical so we will always see values for both when counting
+        all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
 
-    # remove any row which had zero coverage in inner or outer region
-    z_inner = all_df.mean_inner == 0
-    z_outer = all_df.mean_outer == 0
-    nz_either = ~(z_inner | z_outer)
-    all_df = all_df[nz_either]
-    logger.info('Rows removed with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
-        sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
+        # remove any row which had zero coverage in inner or outer region
+        z_inner = all_df.mean_inner == 0
+        z_outer = all_df.mean_outer == 0
+        nz_either = ~(z_inner | z_outer)
+        all_df = all_df[nz_either]
+        logger.info('Rows removed with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
+            sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-    # check that we have some of by read types
-    count_rtype = all_df.groupby('read_type').size()
-    logger.info('Break down of accepted reads: wgs {:,} junction {:,}'.format(count_rtype.wgs, count_rtype.hic))
-    if count_rtype.wgs == 0:
-        raise InsufficientDataException('No reads classified as wgs were observed.')
-    if count_rtype.hic == 0:
-        raise InsufficientDataException('No reads containing junctions were observed.')
+        # check that we have some of by read types
+        count_rtype = all_df.groupby('read_type').size()
+        report['all'] = {'nojunc': count_rtype.wgs, 'hasjunc': count_rtype.hic}
+        logger.info('Break down of accepted reads: wgs {:,} junction {:,}'.format(count_rtype.wgs, count_rtype.hic))
+        if count_rtype.wgs == 0:
+            raise InsufficientDataException('No reads classified as wgs were observed.')
+        if count_rtype.hic == 0:
+            raise InsufficientDataException('No reads containing junctions were observed.')
 
-    # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
-    all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
-    all_df['pvalue'] = 0
+        # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
+        all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
+        all_df['pvalue'] = 0
 
-    logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
-                .format(starts_with_cutsite,
-                        starts_with_cutsite / analysis_counter.count('accepted') * 100))
-    logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                .format(1 / 4 ** lig_info.site_len * 100))
-    logger.info('Number of accepted reads containing the junction sequence: {:,} ({:#.4g}% of accepted)'
-                .format(count_rtype.hic,
-                        count_rtype.hic / analysis_counter.count('accepted') * 100))
-    logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                .format(1 / 4 ** lig_info.junc_len * 100))
+        report['cs_start'] = starts_with_cutsite
+        logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
+                    .format(starts_with_cutsite,
+                            starts_with_cutsite / analysis_counter.count('accepted') * 100))
+        logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
+                    .format(1 / 4 ** lig_info.site_len * 100))
+        logger.info('Number of accepted reads containing the junction sequence: {:,} ({:#.4g}% of accepted)'
+                    .format(count_rtype.hic,
+                            count_rtype.hic / analysis_counter.count('accepted') * 100))
+        logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
+                    .format(1 / 4 ** lig_info.junc_len * 100))
 
-    # calculate the table of empirical p-values
-    uniq_obs = assign_empirical_pvalues_uniq(all_df)
+        # calculate the table of empirical p-values
+        uniq_obs = assign_empirical_pvalues_all(all_df)
 
-    logger.info('Number of unique observations used in empirical p-value: wgs {:,}, hic {:,}'
-                .format(sum(uniq_obs.read_type == 'wgs'), sum(uniq_obs.read_type == 'hic')))
+        n_wgs = sum(uniq_obs.read_type == 'wgs')
+        n_hic = sum(uniq_obs.read_type == 'hic')
+        report['unique'] = {'nojunc': n_wgs, 'hasjunc': n_hic}
+        logger.info('Number of unique observations used in empirical p-value: wgs {:,}, hic {:,}'
+                    .format(n_wgs, n_hic))
 
-    # estimation hic fraction from empirical p-values
-    hic_frac = pvalue_expectation(distribute_pvalues(uniq_obs))
+        # estimation hic fraction from empirical p-values
+        hic_frac = pvalue_expectation(distribute_pvalues(uniq_obs))
+        report['frac_hic'] = hic_frac
+        logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
+                    .format(hic_frac['mean'] * 100, hic_frac['error'] * 100))
 
-    logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
-                .format(hic_frac['mean'] * 100, hic_frac['error'] * 100))
+        mean_read_len = cumulative_length / analysis_counter.count('accepted')
+        report['mean_readlen'] = mean_read_len
+        logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
 
-    mean_read_len = cumulative_length / analysis_counter.count('accepted')
-    logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
+        if mean_insert is not None:
+            unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
 
-    if mean_insert is not None:
-        unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
+            if unobserved_fraction < 0:
+                unobserved_fraction = 0
+                report['unobs_frac'] = unobserved_fraction
+                logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
+                               'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
+                               .format(mean_insert, unobserved_fraction))
+            else:
+                report['mean_insert'] = mean_insert
+                logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                            .format(mean_insert, unobserved_fraction))
+                report['adj_fraction'] = {'mean': hic_frac['mean'] * (1 + unobserved_fraction),
+                                          'error': hic_frac['error'] * (1 + unobserved_fraction)}
+                logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} \u00b1 {:#.4g} %'
+                            .format(hic_frac['mean'] * (1 + unobserved_fraction) * 100,
+                                    hic_frac['error'] * (1 + unobserved_fraction) * 100))
 
-        if unobserved_fraction < 0:
-            unobserved_fraction = 0
-            logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
-                           'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, unobserved_fraction))
-        else:
-            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(mean_insert, unobserved_fraction))
-            logger.info('Adjusting for unobserved junction sequences using average fragment size: {}nt'
-                        .format(mean_insert))
-            logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} \u00b1 {:#.4g} %'
-                        .format(hic_frac['mean'] * (1 + unobserved_fraction) * 100,
-                                hic_frac['error'] * (1 + unobserved_fraction) * 100))
+        # combine them together
+        if output_table is not None:
+            import os
+            # append the gzip suffix is required
+            if not output_table.endswith('.gz'):
+                output_table = '{}.gz'.format(output_table)
+            # don't overwrite existing files
+            if os.path.exists(output_table):
+                logging.WARNING('The path {} already exists, output table was not written'.format(output_table))
+            else:
+                logger.info('Writing observations to gzipped tab-delimited file: {}'.format(output_table))
+                with gzip.open(output_table, 'wt') as out_h:
+                    all_df.to_csv(out_h, sep='\t')
 
-    # combine them together
-    if output_table is not None:
-        import os
-        # append the gzip suffix is required
-        if not output_table.endswith('.gz'):
-            output_table = '{}.gz'.format(output_table)
-        # don't overwrite existing files
-        if os.path.exists(output_table):
-            logging.WARNING('The path {} already exists, output table was not written'.format(output_table))
-        else:
-            logger.info('Writing observations to gzipped tab-delimited file: {}'.format(output_table))
-            with gzip.open(output_table, 'wt') as out_h:
-                all_df.to_csv(out_h, sep='\t')
+    finally:
+        # append report to file
+        if report_path is not None:
+            write_jsonline(report_path, {'kmer_mode': report})

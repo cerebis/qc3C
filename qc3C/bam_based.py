@@ -5,12 +5,12 @@ import os
 import pysam
 import subprocess
 import tqdm
+
 from typing import Optional
 from abc import ABC, abstractmethod
-
 from qc3C.exceptions import NameSortingException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
-from qc3C.utils import init_random_state, warn_if
+from qc3C.utils import init_random_state, warn_if, write_jsonline
 
 logger = logging.getLogger(__name__)
 
@@ -505,7 +505,7 @@ def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: Ligati
 
 def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, min_mapq: int = 60, threads: int = 1,
-            num_obs: int = None) -> None:
+            report_path: str = None, num_obs: int = None) -> None:
     """
     Analyze a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
     This method attempts to assess details which indicate the overall strength of the
@@ -519,6 +519,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
     :param sample_rate: consider only a portion of all pairs [0..1]
     :param min_mapq: the minimum acceptable mapping quality
     :param threads: the number of threads used in accessing the bam file
+    :param report_path: append a report in single-line JSON format to the given path.
     :param num_obs: the number of observations to collect before rendering report
     """
 
@@ -665,10 +666,33 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                     if _no_site:
                         pair_counts['no_site'] += 1
 
+        #
+        # Initial values in json report
+        #
 
-        """
-        Report the results
-        """
+        report = {
+            'n_parsed': pair_parser.read_filter.counts['all'],
+            'n_analysed': pair_parser.read_filter.analyzed(),
+            'n_unmapped': pair_parser.read_filter.counts['unmapped'],
+            'n_lowmapq': pair_parser.read_filter.counts['mapq'],
+            'n_reflen': pair_parser.read_filter.counts['ref_len'],
+            'n_secondary': pair_parser.read_filter.counts['secondary'],
+            'n_supplementary': pair_parser.read_filter.counts['supplementary'],
+            'n_weakmapping': pair_parser.read_filter.counts['weak'],
+            'n_refterm': pair_parser.read_filter.counts['ref_term'],
+            'n_accepted': pair_parser.read_filter.count('accepted'),
+            'n_acceptedpairs': pair_parser.pair_filter.analyzed(),
+            'n_transpairs': pair_parser.pair_filter.counts['trans'],
+            'n_cispairs': pair_parser.pair_filter.cis_count(),
+            'n_fullyalign': pair_counts['full_align'],
+            'n_alignterm': pair_counts['early_term'],
+            'n_nositeend': pair_counts['no_site'],
+            'n_short': short_count,
+        }
+
+        #
+        # Log the results
+        #
 
         logger.info('Number of parsed reads: {:,}'
                     .format(pair_parser.read_filter.counts['all']))
@@ -737,7 +761,6 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
             logger.log(warn_if(mean_err > 0.1),
                        'Observed short-range mean pair separation differs from supplied insert length by {:.1f}%'
                        .format(mean_err * 100))
-
             if short_count > 10 * mean_insert:
                 logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
                             .format(emp_mean,
@@ -745,11 +768,13 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
             else:
                 logger.warning('Too few short-range pairs for reliable streaming median estimation')
                 logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
+        report['emp_mean'] = emp_mean
 
         # predict unobserved fraction using a uniform model of junction location
         # across the observed mean insert length
         mean_read_len = cumulative_length / pair_counts['total']
         logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
+        report['mean_readlen'] = mean_read_len
         unobs_frac = {}
         for _tag, _insert_len in {'supplied': mean_insert, 'observed': emp_mean}.items():
 
@@ -760,6 +785,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                 continue
 
             unobs_frac[_tag] = (_insert_len - mean_read_len * 2) / _insert_len
+            report.setdefault('unobs_frac', {})[_tag] = unobs_frac[_tag]
             if unobs_frac[_tag] < 0:
                 unobs_frac[_tag] = 0
                 logger.warning('For {} insert length of {:.0f}nt, estimation of the unobserved fraction '
@@ -775,10 +801,22 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         # per-enzyme statistics
         for enz, counts in enzyme_counts.items():
+
+            report[enz] = {'cs_start': counts['cs_start'],
+                                'cs_term': counts['cs_term'],
+                                'cs_full': counts['cs_full'],
+                                'partial_readthru': counts['partial_readthru'],
+                                'read_thru': counts['read_thru'],
+                                'is_split':  counts['is_split'],
+                                'upper_bound': counts['cs_term'] - counts['cs_full'],
+                                'elucidation': ligation_variants[enz].elucidation,
+                                'vestigial': ligation_variants[enz].vestigial}
+
             logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
                         .format(enz,
                                 counts['cs_start'],
                                 counts['cs_start'] / pair_counts['total']*100))
+
             logger.info('For {}, cut-site {} has remnant {}'
                         .format(enz,
                                 ligation_variants[enz].elucidation,
@@ -796,6 +834,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                                 counts['cs_full'] / pair_counts['total']*100))
 
             delta_cs = counts['cs_term'] - counts['cs_full']
+            p_ub = delta_cs / pair_counts['total']
             logger.info('For {}, upper bound of read-thru events: {:,} ({:#.4g}%)'
                         .format(enz,
                                 delta_cs,
@@ -816,19 +855,26 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
                                 counts['is_split'],
                                 counts['is_split'] / pair_counts['total']*100))
 
+            report[enz]['fraction'] = {'read_thru': p_obs, 'upper_bound': p_ub}
+
             for _tag, _frac in unobs_frac.items():
                 if _frac is None:
                     logger.info('For {} there was insufficient {} data, no adjustment could be made to Hi-C fraction'
                                 .format(enz, _tag))
                     continue
 
-                p_ub = delta_cs / pair_counts['total']
+                report[enz].setdefault('adj_fraction', {})[_tag] = {
+                    'read_thru': p_obs + p_obs * _frac,
+                    'upper_bound': p_ub + p_ub * _frac
+                }
+
                 logger.info('For {} based on {} data, adjusted estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
                             .format(enz, _tag,
                                     (p_obs + p_obs * _frac) * 100,
                                     (p_ub + p_ub * _frac) * 100))
 
         # long-range bin counts, with formatting to align fields
+
         field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
         logger.info('Long-range distance intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
                     .format(*long_bins,
@@ -836,7 +882,20 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         logger.info('Number of observed pairs:      {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
                     .format(*long_counts,
                             w=field_width))
-        frac = long_counts.astype(np.float) / pair_counts['separation']
-        logger.info('Relative fraction of all obs:   {:#.4g},   {:#.4g},   {:#.4g}'
-                    .format(*frac,
+        frac_cis = long_counts.astype(np.float) / pair_counts['separation']
+        logger.info('Relative fraction of all cis:   {:#.4g},   {:#.4g},   {:#.4g}'
+                    .format(*frac_cis,
                             w=field_width))
+        frac_pairs = long_counts.astype(np.float) / pair_counts['total']
+        logger.info('Relative fraction of all pairs: {:#.4g},   {:#.4g},   {:#.4g}'
+                    .format(*frac_pairs,
+                            w=field_width))
+
+        report['separation_histogram'] = {'count': long_counts.tolist(), 'frac': frac_cis.tolist()}
+        report['separation_histogram'] = {'count': long_counts.tolist(),
+                                          'frac_cis': frac_cis.tolist(),
+                                          'frac_pairs': frac_pairs.tolist()}
+
+        # append report to file
+        if report_path is not None:
+            write_jsonline(report_path, {'bam_mode': report})

@@ -1,10 +1,14 @@
+import os
 import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
+
 from qc3C.exceptions import ApplicationException
 from qc3C._version import version_stamp
 
+
 __log_name__ = 'qc3C.log'
+__report_name__ = 'report.jsonl'
 
 
 def main():
@@ -27,6 +31,10 @@ def main():
     global_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
                                help='Random seed used in sampling the read-set [None]')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads [1]')
+    global_parser.add_argument('--output-path', metavar='PATH', default='.',
+                               help='Write output files to this folder [.]')
+    global_parser.add_argument('--write-report', default=False, action='store_true',
+                               help='Create a result report in JSONLines format')
     # global_parser.add_argument('-n', '--num-obs', type=int, action=UniqueStore,
     #                            help='Stop parsing after collecting N observations [None]')
     global_parser.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
@@ -93,7 +101,7 @@ def main():
     ch.setFormatter(formatter)
     root.addHandler(ch)
 
-    fh = logging.FileHandler(__log_name__, mode='a')
+    fh = logging.FileHandler(os.path.join(args.output_path, __log_name__), mode='a')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     root.addHandler(fh)
@@ -102,6 +110,10 @@ def main():
     logger.debug(version_stamp(False))
     logger.debug(sys.version.replace('\n', ' '))
     logger.debug('Command line: {}'.format(' '.join(sys.argv)))
+
+    report_path = None
+    if args.write_report:
+        report_path = os.path.join(args.output_path, __report_name__)
 
     try:
 
@@ -116,7 +128,8 @@ def main():
 
             bam.analyze(args.bam, args.enzyme, args.mean_insert, seed=args.seed,
                         sample_rate=args.sample_rate, threads=args.threads,
-                        min_mapq=args.min_mapq, num_obs=None)
+                        min_mapq=args.min_mapq, report_path=report_path,
+                        num_obs=None)
 
         # Kmer based analysis
         elif args.command == 'kmer':
@@ -129,7 +142,8 @@ def main():
 
             kmer.analyze(args.enzyme[0], args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
-                         threads=args.threads, output_table=args.output_table, num_obs=None)
+                         threads=args.threads, output_table=args.output_table, report_path=report_path,
+                         num_obs=None)
 
     except ApplicationException as ex:
         logger.error(str(ex))
