@@ -2,37 +2,24 @@
 
 qc3C attempts to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library. That is, read-pairs which are a true product of proximity ligation, rather than self-religation or shotgun noise. To accomplish this, two modes of analysis are available: BAM analysis and assembly-free kmer analysis. 
 
-### Installation
+## Installation
 
 Installing qc3C can be accomplished directly from Github using Pip or installation can be avoided by use of Docker or Singularity. One currently unavoidable complication of our Pip installation is that Jellyfish (a major dependency) must be installed separately.
 
 Jellyfish is a well documented project, so if you encounter problems with its installation we encouraged you to refer it's own [Github repo](https://github.com/gmarcais/Jellyfish).
 
-#### Pre-requisites for Jellyfish 
+### Step 1: Install Jellyfish
+
+**Pre-requisites for Jellyfish**
 
 - GNU g++ version >= v4.4
 - Autoconf
 - Make
 
-#### Installing Jellyfish
 
-From a working directory of your choosing:
-
-1. pull down the latest source from Github
-2. extract and enter the project directory
-3. extend the pkgconf path variable to make sure the required packing information is found at build time.
-4. build and install the command line `jellyfish` tool, which is requied to create k-mer libraries.
-5. enter the python hook subdirectory
-6. explicitly build and install the Python module (dna_jellyfish).
+**Steps from a working directory of your choosing**
 
 All of these steps should complete without error.
-
-##### Notes
-- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether, on your system, using the simpler invocation `python` unintentionally invokes a py2 interpreter.
-- The commands below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
-  
-  - For the dynamic libraries and jellyfish executable: `./configure --prefix=$HOME`. 
-  - For the Python modules, this is more cumbersome to accomplish. We'd recommend that for non-root installations users employ a Conda environment. 
 
 ```bash
 # Step 1
@@ -49,15 +36,35 @@ cd swig/python
 python3 setup.py build && sudo python3 setup.py install
 ```
 
-#### Installing qc3C using Pip
+**Installation comments**
+
+- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether on your system using the simpler invocation `python` unintentionally invokes a py2 interpreter.
+- The commands above and below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
+  
+  - For the dynamic libraries and jellyfish executable: `./configure --prefix=$HOME`. 
+  - For the Python modules, this is more cumbersome to accomplish. We'd recommend that for non-root installations users either employ a Conda environment or `pip install --user` for both qc3C and Jellyfish.
+
+
+### Step 2: Install qc3C using Pip
+
+qc3C can be installed directly from Github with the following command.
+
 ```bash
 pip3 install git+https://github.com/cerebis/qc3C
 ```
 
+## Using Docker the image
 
-#### Using Docker the image
+We maintain an update to date image of qc3C on Dockerhub. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
 
-We maintain an update to date image of qc3C on Dockerhub. The image also includes a working installation of Jellyfish. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
+The image also includes a the following tools:
+
+- Jellyfish
+- samtoools
+- bwa
+- bbmap
+- spades
+- pigz
 
 First, pull the required image from Dockerhub.
 ```bash
