@@ -43,6 +43,7 @@ RUN pip3 install "pandas==0.24.2"
 RUN pip3 install git+https://github.com/cerebis/qc3C
 
 FROM python:3-alpine
+RUN apk add --no-cache --update-cache pigz
 WORKDIR /usr/local
 COPY --from=builder /bin/bash /bin/
 COPY --from=builder /usr/lib /usr/lib/

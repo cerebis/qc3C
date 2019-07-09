@@ -76,11 +76,13 @@ FROM centos:centos6
 
 # create up to date system
 RUN yum update -y && \
+    yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-6.noarch.rpm && \
     yum install -y --setopt=tsflags=nodocs \
         bzip2 \
         centos-release-scl \
         gettext \
         ncurses \
+        pigz \
         xz \
         zlib && \
     yum install -y rh-python36 && \
