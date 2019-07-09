@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from qc3C.exceptions import NameSortingException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo
 from qc3C.utils import init_random_state, warn_if, write_jsonline
+from qc3C._version import runtime_info
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +672,7 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
         #
 
         report = {
+            'runtime_info': runtime_info(),
             'n_parsed': pair_parser.read_filter.counts['all'],
             'n_analysed': pair_parser.read_filter.analyzed(),
             'n_unmapped': pair_parser.read_filter.counts['unmapped'],

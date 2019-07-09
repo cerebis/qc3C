@@ -11,6 +11,7 @@ from typing import TextIO, Optional, Dict
 from qc3C.exceptions import InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, test_for_exe, write_jsonline
+from qc3C._version import runtime_info
 
 try:
     import dna_jellyfish
@@ -533,6 +534,7 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     # Reporting
     #
     report = {
+        'runtime_info': runtime_info(),
         'n_parsed': analysis_counter.counts['all'],
         'n_analyzed': analysis_counter.analyzed(),
         'n_short': analysis_counter.count('short'),

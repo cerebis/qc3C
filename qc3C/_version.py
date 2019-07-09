@@ -17,3 +17,19 @@ def version_stamp(full: bool = True) -> str:
         return 'qc3C {}\n{}'.format(__version__, __copyright__)
     else:
         return 'qc3C {}'.format(__version__)
+
+
+def date_stamp() -> str:
+    """
+    :return: Return a datetime stamp in the format YYYY-mm-dd hh:mm:ss.f
+    """
+    from datetime import datetime
+    _now = datetime.now()
+    return _now.strftime('%Y-%m-%d %H:%M:%S.%f')
+
+
+def runtime_info() -> dict:
+    """
+    :return: Return runtime info (version and date stamps) as a dict
+    """
+    return {'qc3C_version': version_stamp(False), 'run_timestamp': date_stamp()}
