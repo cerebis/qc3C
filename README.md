@@ -38,8 +38,8 @@ python3 setup.py build && sudo python3 setup.py install
 
 **Installation comments**
 
-- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether, on your system, using the simpler invocation `python` unintentionally invokes a py2 interpreter.
-- The commands below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
+- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether on your system using the simpler invocation `python` unintentionally invokes a py2 interpreter.
+- The commands above and below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
   
   - For the dynamic libraries and jellyfish executable: `./configure --prefix=$HOME`. 
   - For the Python modules, this is more cumbersome to accomplish. We'd recommend that for non-root installations users either employ a Conda environment or `pip install --user` for both qc3C and Jellyfish.
