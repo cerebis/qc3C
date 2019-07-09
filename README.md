@@ -4,7 +4,15 @@ qc3C attempts to provide a means of assessing the proportion of "signal" within 
 
 ### Installation
 
-Installing qc3C can be accomplished directly from Github using Pip or installation can be avoided by use of Docker or Singularity. One complication of the Pip based installation is that the supporting tool Jellyfish, which also provides a required Python module, must be installed separately.
+Installing qc3C can be accomplished directly from Github using Pip or installation can be avoided by use of Docker or Singularity. One currently unavoidable complication of our Pip installation is that Jellyfish (a major dependency) must be installed separately.
+
+Jellyfish is a well documented project, so if you encounter problems with its installation we encouraged you to refer it's own [Github repo](https://github.com/gmarcais/Jellyfish).
+
+#### Pre-requisites for Jellyfish 
+
+- GNU g++ version >= v4.4
+- Autoconf
+- Make
 
 #### Installing Jellyfish
 
@@ -19,7 +27,12 @@ From a working directory of your choosing:
 
 All of these steps should complete without error.
 
-_Note: Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether, on your system, using the simpler invocation `python` unintentionally invokes a py2 interpreter._
+##### Notes
+- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether, on your system, using the simpler invocation `python` unintentionally invokes a py2 interpreter.
+- The commands below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
+  
+  - For the dynamic libraries and jellyfish executable: `./configure --prefix=$HOME`. 
+  - For the Python modules, this is more cumbersome to accomplish. We'd recommend that for non-root installations users employ a Conda environment. 
 
 ```bash
 # Step 1
@@ -29,11 +42,11 @@ tar xzf jellyfish-2.2.10.tar.gz && cd jellyfish-2.2.10
 # Step 3
 export PKG_CONFIG_PATH=$PWD:$PKG_CONFIG_PATH
 # Step 4
-./configure && make && make install
+./configure && sudo make install
 # Step 5
 cd swig/python
 # Step 6
-python3 setup.py build && python3 setup.py install
+python3 setup.py build && sudo python3 setup.py install
 ```
 
 #### Installing qc3C using Pip
