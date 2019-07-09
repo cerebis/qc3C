@@ -673,6 +673,8 @@ def analyze(bam_file: str, enzymes: list, mean_insert: int, seed: int = None,
 
         report = {
             'runtime_info': runtime_info(),
+            'input_args': {'bam_file': bam_file, 'mean_insert': mean_insert, 'seed': seed,
+                           'sample_rate': sample_rate, 'min_mapq': min_mapq},
             'n_parsed': pair_parser.read_filter.counts['all'],
             'n_analysed': pair_parser.read_filter.analyzed(),
             'n_unmapped': pair_parser.read_filter.counts['unmapped'],

@@ -535,6 +535,8 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     #
     report = {
         'runtime_info': runtime_info(),
+        'input_args': {'kmer_db': kmer_db, 'read_list': read_list, 'seed': seed,
+                       'sample_rate': sample_rate, 'max_coverage': max_coverage},
         'n_parsed': analysis_counter.counts['all'],
         'n_analyzed': analysis_counter.analyzed(),
         'n_short': analysis_counter.count('short'),
