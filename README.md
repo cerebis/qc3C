@@ -55,7 +55,16 @@ pip3 install git+https://github.com/cerebis/qc3C
 
 ## Using Docker the image
 
-We maintain an update to date image of qc3C on Dockerhub. The image also includes a working installation of Jellyfish. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
+We maintain an update to date image of qc3C on Dockerhub. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
+
+The image also includes a the following tools:
+
+- Jellyfish
+- samtoools
+- bwa
+- bbmap
+- spades
+- pigz
 
 First, pull the required image from Dockerhub.
 ```bash
