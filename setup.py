@@ -31,9 +31,11 @@ setuptools.setup(
     install_requires=[
         'biopython',
         'leven',
+        'numba',
         'numpy',
         'pandas',
         'pysam',
+        'scipy',
         'tqdm'
     ],
 

@@ -9,6 +9,7 @@ from qc3C._version import version_stamp
 
 __log_name__ = 'qc3C.log'
 __report_name__ = 'report.jsonl'
+__table_name__ = 'obs_table.tsv.gz'
 
 
 def main():
@@ -16,10 +17,15 @@ def main():
     import sys
 
     class UniqueStore(argparse.Action):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.count = 0
+
         def __call__(self, parser, namespace, values, option_string=None):
-            if getattr(namespace, self.dest, self.default) is not None:
+            if self.count >= 1:
                 parser.error('duplicate use of the option: {}'.format(option_string))
             setattr(namespace, self.dest, values)
+            self.count += 1
 
     """
     Shared CLI arguments
@@ -35,16 +41,16 @@ def main():
                                help='Write output files to this folder [.]')
     global_parser.add_argument('--write-report', default=False, action='store_true',
                                help='Create a result report in JSONLines format')
-    # global_parser.add_argument('-n', '--num-obs', type=int, action=UniqueStore,
-    #                            help='Stop parsing after collecting N observations [None]')
+    global_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
+                               help='The library kit type [generic]')
     global_parser.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
                                help='Mean fragment length to use in estimating the unobserved junction rate')
-    global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
-                               help='One or more case-sensitive NEB enzyme names'
-                                    '(Use multiple times for multiple files enzymes)')
+    global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action=UniqueStore, required=True,
+                               help='A case-sensitive NEB enzyme name')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
+
     subparsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
                                        help='choose an analysis stage for further options')
     subparsers.required = False
@@ -56,16 +62,18 @@ def main():
     """
     cmd_bam.add_argument('-q', '--min-mapq', default=60, type=int, action=UniqueStore,
                          help='Minimum acceptable mapping quality [60]')
+    cmd_bam.add_argument('-f', '--fasta', required=True, action=UniqueStore,
+                         help='Reference sequences')
     cmd_bam.add_argument('-b', '--bam', required=True, action=UniqueStore,
                          help='Input name-sorted bam file of Hi-C reads mapped to references')
 
     """
     CLI for Kmer based analysis
     """
-    cmd_kmer.add_argument('--output-table', default=None, action=UniqueStore,
-                          help='Save the collected per-read statistics table to a file')
-    cmd_kmer.add_argument('-x', '--max-coverage', default=500, type=int, action=UniqueStore,
-                          help='Ignore regions with more than this coverage [500]')
+    cmd_kmer.add_argument('--write-table', default=False, action='store_true',
+                          help='Save the collected observations to a file')
+    cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float, action=UniqueStore,
+                          help='Ignore regions possessing k-mer frequencies above this quantile [0.9]')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
@@ -101,6 +109,10 @@ def main():
     ch.setFormatter(formatter)
     root.addHandler(ch)
 
+    # create the output folder if it did not exist
+    if not os.path.exists(args.output_path):
+        os.mkdir(args.output_path)
+
     fh = logging.FileHandler(os.path.join(args.output_path, __log_name__), mode='a')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
@@ -126,24 +138,25 @@ def main():
         # BAM based analysis
         if args.command == 'bam':
 
-            bam.analyze(args.bam, args.enzyme, args.mean_insert, seed=args.seed,
-                        sample_rate=args.sample_rate, threads=args.threads,
+            bam.analyse(args.bam, args.fasta, args.enzyme, args.mean_insert,
+                        seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
                         min_mapq=args.min_mapq, report_path=report_path,
-                        num_obs=None)
+                        library_kit=args.library_kit)
 
         # Kmer based analysis
         elif args.command == 'kmer':
 
+            table_path = None
+            if args.write_table:
+                table_path = os.path.join(args.output_path, __table_name__)
+
             if len(set(args.reads)) != len(args.reads):
                 parser.error('Some supplied input read-sets are the same file')
 
-            if len(args.enzyme) > 1:
-                parser.error('kmer analysis mode only supports a single enyzme')
-
-            kmer.analyze(args.enzyme[0], args.lib, args.reads, args.mean_insert,
-                         sample_rate=args.sample_rate, seed=args.seed, max_coverage=args.max_coverage,
-                         threads=args.threads, output_table=args.output_table, report_path=report_path,
-                         num_obs=None)
+            kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
+                         sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
+                         threads=args.threads, output_table=table_path, report_path=report_path,
+                         library_kit=args.library_kit)
 
     except ApplicationException as ex:
         logger.error(str(ex))

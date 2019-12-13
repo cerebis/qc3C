@@ -1,6 +1,8 @@
 biopython
 leven
+numba
 numpy
 pandas
 pysam
+scipy
 tqdm

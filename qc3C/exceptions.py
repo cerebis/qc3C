@@ -4,6 +4,13 @@ class ApplicationException(Exception):
         super(ApplicationException, self).__init__(message)
 
 
+class UnknownLibraryKitException(ApplicationException):
+    """The library kit is unknown"""
+    def __init__(self, library_kit: str):
+        super(UnknownLibraryKitException, self).__init__(
+            'The library kit {} is unknown'.format(library_kit))
+
+
 class UnknownEnzymeException(ApplicationException):
     """Supplied enzyme name was not found in biopython"""
     def __init__(self, target: str, similar: list):
