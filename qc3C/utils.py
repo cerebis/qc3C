@@ -15,7 +15,7 @@ from .exceptions import ApplicationException
 logger = logging.getLogger(__name__)
 
 
-def observed_fraction(read_len: int, mean_insert: int, kmer_size: int, junc_size: int, is_phase: bool) -> float:
+def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size: int = 0, junc_size: int = 0) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size how much
@@ -43,13 +43,14 @@ def observed_fraction(read_len: int, mean_insert: int, kmer_size: int, junc_size
         frag_mask = np.zeros(mean_insert, dtype=np.bool)
         read_mask = np.zeros(read_len, dtype=np.bool)
         x_min, x_max = kmer_size + junc_size, read_len - kmer_size
-        # mark the region of the read which can be interrogated
+        # create a read mask that represents the region of the read which can be interrogated
         read_mask[x_min:x_max] = True
-        # transfer this silhouette-pair to the fragment mask
+        # create a fragment mask by transferring this silhouette to either end of the fragment
+        # handling the edge-case where the insert length is less than the read length
         a = read_len if read_len < mean_insert else mean_insert
         frag_mask[:a] |= read_mask[:a]
         frag_mask[-a:] |= read_mask[::-1][-a:]
-        # the observable fraction of the total fragment length
+        # return the fragment mask
         return frag_mask
 
     obs_mask = make_observable_mask(read_len, mean_insert, kmer_size, junc_size)

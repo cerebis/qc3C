@@ -37,14 +37,14 @@ def main():
     global_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
                                help='Random seed used in sampling the read-set [None]')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads [1]')
+    global_parser.add_argument('-M', '--max-obs', type=int, action=UniqueStore,
+                               help='Stop after collecting this many observations')
     global_parser.add_argument('--output-path', metavar='PATH', default='.',
                                help='Write output files to this folder [.]')
     global_parser.add_argument('--write-report', default=False, action='store_true',
                                help='Create a result report in JSONLines format')
     global_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
                                help='The library kit type [generic]')
-    global_parser.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
-                               help='Mean fragment length to use in estimating the unobserved junction rate')
     global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action=UniqueStore, required=True,
                                help='A case-sensitive NEB enzyme name')
 
@@ -74,6 +74,8 @@ def main():
                           help='Save the collected observations to a file')
     cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float, action=UniqueStore,
                           help='Ignore regions possessing k-mer frequencies above this quantile [0.9]')
+    cmd_kmer.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
+                          help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
@@ -138,9 +140,9 @@ def main():
         # BAM based analysis
         if args.command == 'bam':
 
-            bam.analyse(args.bam, args.fasta, args.enzyme, args.mean_insert,
+            bam.analyse(args.bam, args.fasta, args.enzyme,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
-                        min_mapq=args.min_mapq, report_path=report_path,
+                        min_mapq=args.min_mapq, max_pairs=args.max_obs, report_path=report_path,
                         library_kit=args.library_kit)
 
         # Kmer based analysis
@@ -156,7 +158,7 @@ def main():
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
-                         library_kit=args.library_kit)
+                         max_obs=args.max_obs, library_kit=args.library_kit)
 
     except ApplicationException as ex:
         logger.error(str(ex))

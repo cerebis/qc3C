@@ -4,6 +4,11 @@ class ApplicationException(Exception):
         super(ApplicationException, self).__init__(message)
 
 
+class MaxObsLimit(StopIteration):
+    """Maximum observation limit reached"""
+    pass
+
+
 class UnknownLibraryKitException(ApplicationException):
     """The library kit is unknown"""
     def __init__(self, library_kit: str):

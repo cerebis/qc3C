@@ -8,7 +8,7 @@ import tqdm
 
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
-from qc3C.exceptions import NameSortingException, UnknownLibraryKitException
+from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo, CutSitesDB
 from qc3C.utils import init_random_state, warn_if, write_jsonline, observed_fraction
 from qc3C._version import runtime_info
@@ -344,7 +344,8 @@ class read_pairs(object):
     def __init__(self, bam_path: str, random_state: np.random.RandomState = None, sample_rate: float = None,
                  min_mapq: int = None, min_reflen: int = None, min_match: int = None, no_trans: bool = False,
                  no_secondary: bool = False, no_supplementary: bool = False, no_refterm: bool = False,
-                 threads: int = 1, count_reads: bool = False, show_progress: bool = False, is_ipynb: bool = False):
+                 threads: int = 1, count_reads: bool = False, show_progress: bool = False,
+                 is_ipynb: bool = False):
         """
         An iterator over the pairs in a bam file, with support for the 'with' statement.
         Pairs are filtered based on user specified critera. Only pairs, whose read both
@@ -370,12 +371,11 @@ class read_pairs(object):
         if random_state is None:
             assert sample_rate is None or sample_rate == 1, 'A random state must be supplied when sub-sampling reads'
 
+        self.n_reads = None
         if count_reads:
             logger.info('Counting alignments in {}'.format(bam_path))
             self.n_reads = count_bam_reads(bam_path, max_cpu=threads)
             logger.info('Found {:,} alignments to analyse'.format(self.n_reads))
-        else:
-            self.n_reads = None
 
         self.bam = pysam.AlignmentFile(bam_path, mode='rb', threads=threads)
         _header = self.bam.header['HD']
@@ -391,10 +391,9 @@ class read_pairs(object):
         # applying sample_rate to reads means that the pass rate of pairs has an upper bound of sample_rate ** 2.
         # therefore take the square, so that the number of pairs is closer to what users expect.
         # this is particularly noticeable for low sample rates (ie passing only 10% of reads means only 1% of pairs)
+        pair_sample_rate = None
         if sample_rate is not None:
             pair_sample_rate = sample_rate ** 0.5
-        else:
-            pair_sample_rate = None
 
         self.read_filter = ReadFilter(pair_sample_rate, min_mapq, min_reflen, min_match,
                                       no_secondary, no_supplementary, no_refterm,
@@ -402,12 +401,12 @@ class read_pairs(object):
         self.pair_filter = PairFilter(no_trans=no_trans)
 
         self.bam_iter = self.bam.fetch(until_eof=True)
-        if not self.show_progress:
-            self.progress = None
-        elif self.is_ipynb:
-            self.progress = tqdm.tqdm_notebook(total=self.n_reads)
-        else:
-            self.progress = tqdm.tqdm(total=self.n_reads)
+        self.progress = None
+        if self.show_progress:
+            if self.is_ipynb:
+                self.progress = tqdm.tqdm_notebook(total=self.n_reads, desc='Reads')
+            else:
+                self.progress = tqdm.tqdm(total=self.n_reads, desc='Reads')
 
     def __enter__(self):
         return self
@@ -489,8 +488,8 @@ def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: Ligati
     return j - lig_info.vest_len
 
 
-def analyse(bam_file: str, fasta_file: str, enzyme_name: str, mean_insert: int,
-            seed: int = None, sample_rate: float = None, min_mapq: int = 60,
+def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
+            seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_pairs: int = None,
             threads: int = 1, report_path: str = None, library_kit: str = 'generic') -> None:
     """
     analyse a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
@@ -501,10 +500,10 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str, mean_insert: int,
     :param bam_file: the path to the bam file
     :param fasta_file: reference sequences
     :param enzyme_name: the name of the enzyme used in Hi-C library creation
-    :param mean_insert: the expected mean insert length of the library
     :param seed: a random integer seed
     :param sample_rate: consider only a portion of all pairs [0..1]
     :param min_mapq: the minimum acceptable mapping quality
+    :param max_pairs: the maximum number of accepted pairs to inspect
     :param threads: the number of threads used in accessing the bam file
     :param report_path: append a report in single-line JSON format to the given path.
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
@@ -517,7 +516,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str, mean_insert: int,
         logger.info('Phase Genomics library kit, treating junction sites as non-uniformly distributed')
         is_phase = True
     elif library_kit == 'generic':
-        logger.info('Generic Hi-C library kit, treating junction sites as` uniformly distributed')
+        logger.info('Generic Hi-C library kit, treating junction sites as uniformly distributed')
         is_phase = False
     else:
         raise UnknownLibraryKitException(library_kit)
@@ -536,26 +535,39 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str, mean_insert: int,
 
     random_state = init_random_state(seed)
 
-    with read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
-                    min_mapq=min_mapq, min_match=1, min_reflen=500,
-                    no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
-                    threads=threads, count_reads=True, show_progress=True) as pair_parser:
+    if max_pairs is not None:
+        show_progress = count_reads = False
+    else:
+        show_progress = count_reads = True
 
-        cumulative_length = 0
-        short_sum = 0
-        short_count = 0
-        long_counts = np.zeros(3, dtype=np.int)
-        long_bins = (1000, 5000, 10000)
-        read_counts = {'full_align': 0, 'early_term': 0, 'no_site': 0}
-        class_counts = {'dangling': 0, 'self_circle': 0, 'religation': 0, 'ffrr_invalid': 0,
-                        'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0, 'valid': 0, 'invalid': 0}
-        enzyme_counts = {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
-                         'is_split': 0, 'partial_readthru': 0}
+    mp_progress = None
+    if max_pairs is not None:
+        mp_progress = tqdm.tqdm(total=max_pairs, desc='Pairs')
 
-        # begin with user supplied median estimate
-        short_median_est = mean_insert
+    cumulative_length = 0
+    short_sum = 0
+    short_count = 0
+    long_counts = np.zeros(3, dtype=np.int)
+    long_bins = (1000, 5000, 10000)
+    read_counts = {'full_align': 0, 'early_term': 0, 'no_site': 0}
+    class_counts = {'dangling': 0, 'self_circle': 0, 'religation': 0, 'ffrr_invalid': 0,
+                    'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0, 'valid': 0, 'invalid': 0}
+    enzyme_counts = {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
+                     'is_split': 0, 'partial_readthru': 0}
 
-        logger.info('Beginning analysis...')
+    n_accepted_obs = 0
+
+    # begin with a guess for insert length
+    short_median_est = 300
+
+    pair_parser = read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
+                             min_mapq=min_mapq, min_match=1, min_reflen=500,
+                             no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
+                             threads=threads, count_reads=count_reads, show_progress=show_progress)
+
+    logger.info('Beginning analysis...')
+
+    try:
 
         for r1, r2 in pair_parser:
 
@@ -694,291 +706,294 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str, mean_insert: int,
                     if _no_site:
                         read_counts['no_site'] += 1
 
-        # some shorthand variables which will be used repeatedly
-        n_pairs_accepted = pair_parser.pair_filter.count('accepted')
-        n_paired_reads = 2 * n_pairs_accepted
-        n_cis_pairs = pair_parser.pair_filter.count('cis')
+            if max_pairs is not None:
+                n_accepted_obs += 1
+                mp_progress.update()
+                if n_accepted_obs >= max_pairs:
+                    raise MaxObsLimit
 
-        #
-        # Initial values for report
-        #
+    except MaxObsLimit:
+        if mp_progress is not None:
+            mp_progress.close()
+            logger.info('Reached user-defined observation limit [{}]'.format(max_pairs))
 
-        report = {
-            'mode': 'bam',
-            'runtime_info': runtime_info(),
-            'input_args': {'bam_file': bam_file,
-                           'fasta_file': fasta_file,
-                           'enzyme': enzyme_name,
-                           'mean_insert': mean_insert,
-                           'seed': seed,
-                           'sample_rate': sample_rate,
-                           'min_mapq': min_mapq},
-            'n_parsed_reads': pair_parser.read_filter.count('all'),
-            'n_analysed_reads': pair_parser.read_filter.analysed(),
-            'n_accepted_reads': pair_parser.read_filter.count('accepted'),
-            'n_unmapped': pair_parser.read_filter.count('unmapped'),
-            'n_low_mapq': pair_parser.read_filter.count('mapq'),
-            'n_ref_len': pair_parser.read_filter.count('ref_len'),
-            'n_secondary': pair_parser.read_filter.count('secondary'),
-            'n_supplementary': pair_parser.read_filter.count('supplementary'),
-            'n_weak_mapping': pair_parser.read_filter.count('weak'),
-            'n_ref_term': pair_parser.read_filter.count('ref_term'),
-            'n_analysed_pairs': pair_parser.pair_filter.analysed(),
-            'n_accepted_pairs': n_pairs_accepted,
-            'n_trans_pairs': pair_parser.pair_filter.count('trans'),
-            'n_cis_pairs': n_cis_pairs,
-            'n_fully_aligned': read_counts['full_align'],
-            'n_align_term': read_counts['early_term'],
-            'n_no_site_end': read_counts['no_site'],
-            'n_short_inserts': short_count,
+    # some shorthand variables which will be used repeatedly
+    n_pairs_accepted = pair_parser.pair_filter.count('accepted')
+    n_paired_reads = 2 * n_pairs_accepted
+    n_cis_pairs = pair_parser.pair_filter.count('cis')
 
-            # HiCPro style classifications
-            'classification': {
+    #
+    # Initial values for report
+    #
 
-                'informative': {'fr': class_counts['fr_valid'],
-                                'rf': class_counts['rf_valid'],
-                                'ffrr': class_counts['ffrr_valid']},
-
-                'uninformative': {'religation': class_counts['religation'],
-                                  'dangling_ends': class_counts['dangling'],
-                                  'self_circle': class_counts['self_circle'],
-                                  'ffrr': class_counts['ffrr_invalid']}
-            }
-        }
-
-        #
-        # Log the results
-        #
-
-        logger.info('Number of parsed reads: {:,}'
-                    .format(pair_parser.read_filter.count('all')))
-        logger.info('Number of analysed reads: {:,} ({:#.4g}% of all)'
-                    .format(pair_parser.read_filter.analysed(),
-                            pair_parser.read_filter.fraction('analysed', 'all') * 100))
-        logger.info('Number of reads filtered [unmapped]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('unmapped'),
-                            pair_parser.read_filter.fraction('unmapped') * 100))
-        logger.info('Number of reads filtered [low mapq]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('mapq'),
-                            pair_parser.read_filter.fraction('mapq') * 100))
-        logger.info('Number of reads filtered [ref length]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('ref_len'),
-                            pair_parser.read_filter.fraction('ref_len') * 100))
-        logger.info('Number of reads filtered [secondary]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('secondary'),
-                            pair_parser.read_filter.fraction('secondary') * 100))
-        logger.info('Number of reads filtered [supplementary]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('supplementary'),
-                            pair_parser.read_filter.fraction('supplementary') * 100))
-        logger.info('Number of reads filtered [weak mapping]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('weak'),
-                            pair_parser.read_filter.fraction('weak') * 100))
-        logger.info('Number of reads filtered [ref terminated]: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('ref_term'),
-                            pair_parser.read_filter.fraction('ref_term') * 100))
-
-        # accepted reads
-        logger.info('Number of accepted reads: {:,} ({:#.4g}% of analysed)'
-                    .format(pair_parser.read_filter.count('accepted'),
-                            pair_parser.read_filter.fraction('accepted') * 100))
-
-        # for pairs which have accepted read filtration stage
-        logger.info('Number of pairs analysed from accepted read pool: {:,}'
-                    .format(pair_parser.pair_filter.analysed()))
-        logger.info('Number of pairs accepted: {:,}'.format(n_pairs_accepted))
-
-        logger.info('Number of pairs trans-mapping: {:,} ({:#.4g}% of pairs)'
-                    .format(pair_parser.pair_filter.count('trans'),
-                            pair_parser.pair_filter.fraction('trans') * 100))
-        logger.info('Number of pairs cis-mapping: {:,} ({:#.4g}% of pairs)'
-                    .format(pair_parser.pair_filter.count('cis'),
-                            pair_parser.pair_filter.fraction('cis') * 100))
-
-        logger.info('Number of paired reads that fully align: {:,} ({:#.4g}% of paired)'
-                    .format(read_counts['full_align'],
-                            read_counts['full_align'] / n_paired_reads * 100))
-        logger.info('Number of paired reads whose alignment terminates early: {:,} ({:#.4g}% of paired)'
-                    .format(read_counts['early_term'],
-                            read_counts['early_term'] / n_paired_reads * 100))
-        logger.info('Number of paired reads not ending in cut-site remnant: {:,} ({:#.4g}% of paired)'
-                    .format(read_counts['no_site'],
-                            read_counts['no_site'] / n_paired_reads * 100))
-
-        logger.info('Number of short-range cis-mapping pairs: {:,} ({:#.4g}% of cis)'
-                    .format(short_count,
-                            short_count / pair_parser.pair_filter.count('cis') * 100))
+    report = {
+        'mode': 'bam',
+        'runtime_info': runtime_info(),
+        'input_args': {'bam_file': bam_file,
+                       'fasta_file': fasta_file,
+                       'enzyme': enzyme_name,
+                       'seed': seed,
+                       'sample_rate': sample_rate,
+                       'min_mapq': min_mapq},
+        'n_parsed_reads': pair_parser.read_filter.count('all'),
+        'n_analysed_reads': pair_parser.read_filter.analysed(),
+        'n_accepted_reads': pair_parser.read_filter.count('accepted'),
+        'n_unmapped': pair_parser.read_filter.count('unmapped'),
+        'n_low_mapq': pair_parser.read_filter.count('mapq'),
+        'n_ref_len': pair_parser.read_filter.count('ref_len'),
+        'n_secondary': pair_parser.read_filter.count('secondary'),
+        'n_supplementary': pair_parser.read_filter.count('supplementary'),
+        'n_weak_mapping': pair_parser.read_filter.count('weak'),
+        'n_ref_term': pair_parser.read_filter.count('ref_term'),
+        'n_analysed_pairs': pair_parser.pair_filter.analysed(),
+        'n_accepted_pairs': n_pairs_accepted,
+        'n_trans_pairs': pair_parser.pair_filter.count('trans'),
+        'n_cis_pairs': n_cis_pairs,
+        'n_fully_aligned': read_counts['full_align'],
+        'n_align_term': read_counts['early_term'],
+        'n_no_site_end': read_counts['no_site'],
+        'n_short_inserts': short_count,
 
         # HiCPro style classifications
-        logger.info('Number of pairs [dangling end]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['dangling'],
-                            class_counts['dangling'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [self-circle]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['self_circle'],
-                            class_counts['self_circle'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [invalid FF/RR]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['ffrr_invalid'],
-                            class_counts['ffrr_invalid'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [religation]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['religation'],
-                            class_counts['religation'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [valid FF/RR]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['ffrr_valid'],
-                            class_counts['ffrr_valid'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [valid RF]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['rf_valid'],
-                            class_counts['rf_valid'] / n_cis_pairs * 100))
-        logger.info('Number of pairs [valid FR]: {:,}  ({:#.4g}% of cis)'
-                    .format(class_counts['fr_valid'],
-                            class_counts['fr_valid'] / n_cis_pairs * 100))
+        'classification': {
 
-        # by default, we assume no fraction has gone unobserved
-        if short_count == 0:
-            emp_mean = None
-            logger.warning('Cannot estimate insert length, no short-range cis-mapping pairs [< 1000nt].')
+            'informative': {'fr': class_counts['fr_valid'],
+                            'rf': class_counts['rf_valid'],
+                            'ffrr': class_counts['ffrr_valid']},
+
+            'uninformative': {'religation': class_counts['religation'],
+                              'dangling_ends': class_counts['dangling'],
+                              'self_circle': class_counts['self_circle'],
+                              'ffrr': class_counts['ffrr_invalid']}
+        }
+    }
+
+    #
+    # Log the results
+    #
+
+    logger.info('Number of parsed reads: {:,}'
+                .format(pair_parser.read_filter.count('all')))
+    logger.info('Number of analysed reads: {:,} ({:#.4g}% of all)'
+                .format(pair_parser.read_filter.analysed(),
+                        pair_parser.read_filter.fraction('analysed', 'all') * 100))
+    logger.info('Number of reads filtered [unmapped]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('unmapped'),
+                        pair_parser.read_filter.fraction('unmapped') * 100))
+    logger.info('Number of reads filtered [low mapq]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('mapq'),
+                        pair_parser.read_filter.fraction('mapq') * 100))
+    logger.info('Number of reads filtered [ref length]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('ref_len'),
+                        pair_parser.read_filter.fraction('ref_len') * 100))
+    logger.info('Number of reads filtered [secondary]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('secondary'),
+                        pair_parser.read_filter.fraction('secondary') * 100))
+    logger.info('Number of reads filtered [supplementary]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('supplementary'),
+                        pair_parser.read_filter.fraction('supplementary') * 100))
+    logger.info('Number of reads filtered [weak mapping]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('weak'),
+                        pair_parser.read_filter.fraction('weak') * 100))
+    logger.info('Number of reads filtered [ref terminated]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('ref_term'),
+                        pair_parser.read_filter.fraction('ref_term') * 100))
+
+    # accepted reads
+    logger.info('Number of accepted reads: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('accepted'),
+                        pair_parser.read_filter.fraction('accepted') * 100))
+
+    # for pairs which have accepted read filtration stage
+    logger.info('Number of pairs analysed from accepted read pool: {:,}'
+                .format(pair_parser.pair_filter.analysed()))
+    logger.info('Number of pairs accepted: {:,}'.format(n_pairs_accepted))
+
+    if n_pairs_accepted <= 0:
+        raise InsufficientDataException('No read-pairs were accepted during parsing.')
+
+    logger.info('Number of pairs trans-mapping: {:,} ({:#.4g}% of pairs)'
+                .format(pair_parser.pair_filter.count('trans'),
+                        pair_parser.pair_filter.fraction('trans') * 100))
+    logger.info('Number of pairs cis-mapping: {:,} ({:#.4g}% of pairs)'
+                .format(pair_parser.pair_filter.count('cis'),
+                        pair_parser.pair_filter.fraction('cis') * 100))
+
+    logger.info('Number of paired reads that fully align: {:,} ({:#.4g}% of paired)'
+                .format(read_counts['full_align'],
+                        read_counts['full_align'] / n_paired_reads * 100))
+    logger.info('Number of paired reads whose alignment terminates early: {:,} ({:#.4g}% of paired)'
+                .format(read_counts['early_term'],
+                        read_counts['early_term'] / n_paired_reads * 100))
+    logger.info('Number of paired reads not ending in cut-site remnant: {:,} ({:#.4g}% of paired)'
+                .format(read_counts['no_site'],
+                        read_counts['no_site'] / n_paired_reads * 100))
+
+    logger.info('Number of short-range cis-mapping pairs: {:,} ({:#.4g}% of cis)'
+                .format(short_count,
+                        short_count / pair_parser.pair_filter.count('cis') * 100))
+
+    # HiCPro style classifications
+    logger.info('Number of pairs [dangling end]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['dangling'],
+                        class_counts['dangling'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [self-circle]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['self_circle'],
+                        class_counts['self_circle'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [invalid FF/RR]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['ffrr_invalid'],
+                        class_counts['ffrr_invalid'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [religation]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['religation'],
+                        class_counts['religation'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [valid FF/RR]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['ffrr_valid'],
+                        class_counts['ffrr_valid'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [valid RF]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['rf_valid'],
+                        class_counts['rf_valid'] / n_cis_pairs * 100))
+    logger.info('Number of pairs [valid FR]: {:,}  ({:#.4g}% of cis)'
+                .format(class_counts['fr_valid'],
+                        class_counts['fr_valid'] / n_cis_pairs * 100))
+
+    # by default, we assume no fraction has gone unobserved
+    if short_count == 0:
+        emp_mean = None
+        logger.warning('Cannot estimate insert length, no short-range cis-mapping pairs [< 1000nt].')
+    else:
+        emp_mean = short_sum / short_count
+        if short_count > 10 * emp_mean:
+            logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
+                        .format(emp_mean,
+                                short_median_est))
         else:
-            emp_mean = short_sum / short_count
-            mean_err = (emp_mean - mean_insert) / mean_insert
-            logger.log(warn_if(mean_err > 0.1),
-                       'Observed short-range mean pair separation differs from supplied insert length by {:.1f}%'
-                       .format(mean_err * 100))
-            if short_count > 10 * mean_insert:
-                logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
-                            .format(emp_mean,
-                                    short_median_est))
-            else:
-                logger.warning('Too few short-range pairs for reliable streaming median estimation')
-                logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
-        report['obs_insert_mean'] = emp_mean
-        report['obs_insert_median'] = short_median_est
+            logger.warning('Too few short-range pairs for reliable streaming median estimation')
+            logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
+    report['obs_insert_mean'] = emp_mean
+    report['obs_insert_median'] = short_median_est
 
-        # predict unobserved fraction using a uniform model of junction location
-        # across the observed mean insert length
-        mean_read_len = cumulative_length / n_paired_reads
-        logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
-        report['mean_readlen'] = mean_read_len
-        unobs_frac = {}
-        for _tag, _insert_len in {'supplied': mean_insert, 'observed': emp_mean}.items():
+    # predict unobserved fraction using a uniform model of junction location
+    # across the observed mean insert length
+    mean_read_len = cumulative_length / n_paired_reads
+    logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
+    report['mean_readlen'] = mean_read_len
 
-            # no mean was supplied or the observed could not be estimated
-            if _insert_len is None:
-                # this will be used later as an indicator of absence
-                unobs_frac[_tag] = None
-                continue
+    # the observed mean could not be estimated
+    if emp_mean is None:
+        # this will be used later as an indicator of absence
+        unobs_frac = None
+    else:
+        unobs_frac = 1 - observed_fraction(is_phase, int(mean_read_len), int(emp_mean))
 
-            unobs_frac[_tag] = 1 - observed_fraction(int(mean_read_len), int(_insert_len), 0, 0, is_phase)
+        if unobs_frac < 0:
+            unobs_frac = 0
+            logger.warning('For observed insert length of {:.0f}nt, estimated unobserved fraction '
+                           'is invalid (<0). Setting to zero.'
+                           .format(emp_mean))
+        else:
+            logger.info('For observed insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                        .format(emp_mean,
+                                unobs_frac))
 
-            if unobs_frac[_tag] < 0:
-                unobs_frac[_tag] = 0
-                logger.warning('For {} insert length of {:.0f}nt, estimated unobserved fraction '
-                               'is invalid (<0). Setting to zero.'
-                               .format(_tag,
-                                       _insert_len,))
-            else:
-                logger.info('For {} insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                            .format(_tag,
-                                    _insert_len,
-                                    unobs_frac[_tag]))
+        report['unobs_frac'] = unobs_frac
 
-            report.setdefault('unobs_frac', {})[_tag] = unobs_frac[_tag]
+    # enzyme statistics
+    enz = ligation_info.enzyme_name
+    enz_stats = {'cs_start': enzyme_counts['cs_start'],
+                 'cs_term': enzyme_counts['cs_term'],
+                 'cs_full': enzyme_counts['cs_full'],
+                 'partial_readthru': enzyme_counts['partial_readthru'],
+                 'read_thru': enzyme_counts['read_thru'],
+                 'is_split':  enzyme_counts['is_split'],
+                 'upper_bound': enzyme_counts['cs_term'] - enzyme_counts['cs_full'],
+                 'elucidation': ligation_info.elucidation,
+                 'vestigial': ligation_info.vestigial}
+    report['enzyme_stats'] = {enz: enz_stats}
 
-        # enzyme statistics
-        enz = ligation_info.enzyme_name
-        enz_stats = {'cs_start': enzyme_counts['cs_start'],
-                     'cs_term': enzyme_counts['cs_term'],
-                     'cs_full': enzyme_counts['cs_full'],
-                     'partial_readthru': enzyme_counts['partial_readthru'],
-                     'read_thru': enzyme_counts['read_thru'],
-                     'is_split':  enzyme_counts['is_split'],
-                     'upper_bound': enzyme_counts['cs_term'] - enzyme_counts['cs_full'],
-                     'elucidation': ligation_info.elucidation,
-                     'vestigial': ligation_info.vestigial}
-        report['enzyme_stats'] = {enz: enz_stats}
+    logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['cs_start'],
+                        enzyme_counts['cs_start'] / n_paired_reads * 100))
 
-        logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
+    logger.info('For {}, cut-site {} has remnant {}'
+                .format(enz,
+                        ligation_info.elucidation,
+                        ligation_info.vestigial))
+    logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
+                .format(enz,
+                        1 / 4 ** ligation_info.vest_len * 100))
+    logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['cs_term'],
+                        enzyme_counts['cs_term'] / n_paired_reads * 100))
+    logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['cs_full'],
+                        enzyme_counts['cs_full'] / n_paired_reads * 100))
+
+    delta_cs = enzyme_counts['cs_term'] - enzyme_counts['cs_full']
+    p_ub = delta_cs / n_paired_reads
+    logger.info('For {}, upper bound of read-thru events: {:,} ({:#.4g}%)'
+                .format(enz,
+                        delta_cs,
+                        delta_cs / n_paired_reads * 100))
+
+    logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['partial_readthru'],
+                        enzyme_counts['partial_readthru'] / n_paired_reads * 100))
+
+    p_obs = enzyme_counts['read_thru'] / n_paired_reads
+    logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['read_thru'],
+                        p_obs*100))
+    logger.info('For {}, number of paired reads with read-thru and split alignment: {:,} ({:#.4g}%)'
+                .format(enz,
+                        enzyme_counts['is_split'],
+                        enzyme_counts['is_split'] / n_paired_reads * 100))
+
+    enz_stats['fraction'] = {'read_thru': p_obs, 'upper_bound': p_ub}
+
+    logger.info('For {} the raw estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
+                .format(enz,
+                        p_obs * 100,
+                        p_ub * 100))
+
+    enz_stats['adj_fraction'] = {}
+    if unobs_frac is None:
+        logger.info('For {} there were not enough observations, no adjustment will be made to Hi-C fraction'
+                    .format(enz))
+        enz_stats['adj_fraction'].update({'read_thru': None, 'upper_bound': None})
+    elif unobs_frac > 0:
+        enz_stats['adj_fraction'].update({
+            'read_thru': p_obs * (1 / (1 - unobs_frac)),
+            'upper_bound': p_ub * (1 / (1 - unobs_frac))
+        })
+
+        logger.info('For {} the adjusted estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
                     .format(enz,
-                            enzyme_counts['cs_start'],
-                            enzyme_counts['cs_start'] / n_paired_reads * 100))
+                            p_obs * (1 / (1 - unobs_frac)) * 100,
+                            p_ub * (1 / (1 - unobs_frac)) * 100))
 
-        logger.info('For {}, cut-site {} has remnant {}'
-                    .format(enz,
-                            ligation_info.elucidation,
-                            ligation_info.vestigial))
-        logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
-                    .format(enz,
-                            1 / 4 ** ligation_info.vest_len * 100))
-        logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            enzyme_counts['cs_term'],
-                            enzyme_counts['cs_term'] / n_paired_reads * 100))
-        logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            enzyme_counts['cs_full'],
-                            enzyme_counts['cs_full'] / n_paired_reads * 100))
+    # long-range bin counts, with formatting to align fields
 
-        delta_cs = enzyme_counts['cs_term'] - enzyme_counts['cs_full']
-        p_ub = delta_cs / n_paired_reads
-        logger.info('For {}, upper bound of read-thru events: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            delta_cs,
-                            delta_cs / n_paired_reads * 100))
+    field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
+    logger.info('Long-range intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
+                .format(*long_bins, w=field_width))
+    logger.info('Number of pairs:       {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
+                .format(*long_counts, w=field_width))
+    vs_all_cis = long_counts.astype(np.float) / n_cis_pairs * 100
+    logger.info('Relative to all cis:  {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
+                .format(*vs_all_cis, w=field_width))
+    vs_accepted = long_counts.astype(np.float) / n_pairs_accepted * 100
+    logger.info('Relative to accepted: {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
+                .format(*vs_accepted, w=field_width))
 
-        logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            enzyme_counts['partial_readthru'],
-                            enzyme_counts['partial_readthru'] / n_paired_reads * 100))
+    report['separation_histogram'] = {'counts': long_counts.tolist(),
+                                      'vs_all_cis': vs_all_cis.tolist(),
+                                      'vs_accepted': vs_accepted.tolist()}
 
-        p_obs = enzyme_counts['read_thru'] / n_paired_reads
-        logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            enzyme_counts['read_thru'],
-                            p_obs*100))
-        logger.info('For {}, number of paired reads with read-thru and split alignment: {:,} ({:#.4g}%)'
-                    .format(enz,
-                            enzyme_counts['is_split'],
-                            enzyme_counts['is_split'] / n_paired_reads * 100))
-
-        enz_stats['fraction'] = {'read_thru': p_obs, 'upper_bound': p_ub}
-
-        enz_stats['adj_fraction'] = {}
-        for _tag, _frac in unobs_frac.items():
-            if _frac is None:
-                logger.info('For {} there was insufficient {} data, no adjustment could be made to Hi-C fraction'
-                            .format(enz, _tag))
-                enz_stats['adj_fraction'][_tag] = {'read_thru': None, 'upper_bound': None}
-                continue
-            if _frac > 0:
-                enz_stats['adj_fraction'][_tag] = {
-                    'read_thru': p_obs * (1 / (1 - _frac)),
-                    'upper_bound': p_ub * (1 / (1 - _frac))
-                }
-
-            logger.info('For {} based on {} data, adjusted estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
-                        .format(enz, _tag,
-                                p_obs * (1 / (1 - _frac)) * 100,
-                                p_ub * (1 / (1 - _frac)) * 100))
-
-        # long-range bin counts, with formatting to align fields
-
-        field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
-        logger.info('Long-range intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
-                    .format(*long_bins, w=field_width))
-        logger.info('Number of pairs:       {:>{w[0]},d},   {:>{w[1]},d},   {:>{w[2]},d}'
-                    .format(*long_counts, w=field_width))
-        vs_all_cis = long_counts.astype(np.float) / n_cis_pairs * 100
-        logger.info('Relative to all cis:  {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
-                    .format(*vs_all_cis, w=field_width))
-        vs_valid = long_counts.astype(np.float) / class_counts['valid'] * 100
-        logger.info('Relative to valid:    {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
-                    .format(*vs_valid, w=field_width))
-        vs_accepted = long_counts.astype(np.float) / n_pairs_accepted * 100
-        logger.info('Relative to accepted: {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
-                    .format(*vs_accepted, w=field_width))
-
-        report['separation_histogram'] = {'counts': long_counts.tolist(),
-                                          'vs_all_cis': vs_all_cis.tolist(),
-                                          'vs_valid': vs_valid.tolist(),
-                                          'vs_accepted': vs_accepted.tolist()}
-
-        # append report to file
-        if report_path is not None:
-            write_jsonline(report_path, report)
+    # append report to file
+    if report_path is not None:
+        write_jsonline(report_path, report)

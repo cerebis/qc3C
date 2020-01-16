@@ -8,7 +8,7 @@ import logging
 
 from collections import namedtuple
 from typing import TextIO, Optional, Dict
-from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException
+from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, write_jsonline, count_sequences, observed_fraction
 from qc3C._version import runtime_info
@@ -22,6 +22,74 @@ logger = logging.getLogger(__name__)
 
 
 CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos', 'seq'])
+
+
+class Counter(object):
+    def __init__(self, **extended_fields):
+        self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
+        self.counts.update(extended_fields)
+
+    def __getitem__(self, item: str):
+        return self.counts[item]
+
+    def __setitem__(self, key: str, value: int):
+        assert key in self.counts, 'Key value {} was not found'.format(key)
+        self.counts[key] = value
+
+    def __iadd__(self, other):
+        if isinstance(other, Counter):
+            _counts = other.counts
+        elif isinstance(other, dict):
+            _counts = other
+        else:
+            raise RuntimeError()
+        for k, v in _counts.items():
+            self.counts[k] += v
+        return self
+
+    def update(self, _dict):
+        for k, v in _dict.items():
+            self.counts[k] = v
+
+    def analysed(self) -> int:
+        return self.counts['all'] - self.counts['sample']
+
+    def accepted(self) -> int:
+        return self.analysed() - self.rejected()
+
+    def rejected(self) -> int:
+        return self.counts['short'] + self.counts['flank'] + self.counts['ambig'] + self.counts['high_cov']
+
+    def count(self, category: str) -> int:
+        """
+        Return the number of counts in a particular category (analysed, rejected or ...)
+        :param category: the category
+        :return: the counts of category
+        """
+        if category == 'analysed':
+            return self.analysed()
+        elif category == 'rejected':
+            return self.rejected()
+        elif category == 'accepted':
+            return self.accepted()
+        else:
+            return self.counts[category]
+
+    def fraction(self, category: str, against: str = 'analysed') -> float:
+        """
+        Return the category's fraction compared to one of (accepted, all, analysed).
+        :param category: the category (numerator)
+        :param against: the denominator
+        :return: a fraction [0,1]
+        """
+        if against == 'accepted':
+            return self.count(category) / self.accepted()
+        elif against == 'all':
+            return self.count(category) / self.counts['all']
+        elif against == 'analysed':
+            return self.count(category) / self.analysed()
+        else:
+            raise RuntimeError('parameter \"against\" must be one of [accepted, analysed or all]')
 
 
 def open_input(file_name: str) -> TextIO:
@@ -123,7 +191,6 @@ def assign_empirical_pvalues_all(df):
     # ascending ratio order
     df = df.sort_values('ratio')
     # extract just the relevant columns as a numpy array
-    # _cols = ('read_type', 'ratio', 'pvalue')
     wgs_obs = df.loc[df.read_type == 'wgs'].to_numpy()
 
     # assign p-values overall, only incrementing when the ratio changes
@@ -169,8 +236,90 @@ def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     return {'mean': _mean, 'error': _err}
 
 
-def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1,
+def get_kmer_size(filename: str) -> int:
+    """
+    Retrieve the k-mer size used in a library by reading the first record.
+    This assumes all mers within the library have the same k-mer size.
+    :param filename:
+    :return: the size of the k-mer used in a Jellyfish library
+    """
+    iter_mer = dna_jellyfish.ReadMerFile(filename)
+    current_mer = iter_mer.mer()
+    k_size = current_mer.k()
+    del iter_mer
+    return k_size
+
+
+def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -> int:
+    """
+    Get a cutoff value for high frequency kmers by calling out to Jellyfish.
+    The external call produces a histogram of kmer frequency, from which Pandas is used to
+    calculate a quantile cut-off.
+
+    :param filename: A jellyfish k-mer database
+    :param q: the threshold quantile
+    :param threads: number of concurrent threads to use
+    :return: maximum frequency cut-off
+    """
+    proc = subprocess.Popen(['jellyfish', 'histo', '-t{}'.format(threads), filename],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        max_cov = pandas.read_csv(proc.stdout, sep=' ', names=['cov', 'count'])['cov'].quantile(q=q)
+        return round(float(max_cov))
+    except Exception as e:
+        raise RuntimeError('Encountered a problem while analyzing kmer distribution. [{}]'.format(e))
+
+
+def next_read(filename: str, site: str, k_size: int,
+              prob_accept: float, progress, counts: Counter,
+              random_state: np.random.RandomState) -> (str, Optional[int], str, int):
+    """
+    Create a generator function which returns sequence data site positions
+    from a FastQ file.
+    :param filename: the fastq file, compressed or not
+    :param site: the target site to find in reads, eg GATCGATC
+    :param k_size: the k-mer size used in the counting database
+    :param prob_accept: probability threshold used to subsample the full read-set
+    :param progress: progress bar for user feedback
+    :param counts: a tracker class for various rejection conditions
+    :param random_state: random state for subsampling
+    :return: yield tuple of (sequence, site_position, read_id, sequence length)
+    """
+    reader = read_seq(open_input(filename))
+    site_size = len(site)
+    unif = random_state.uniform
+
+    for _id, _seq, _qual in reader:
+
+        counts['all'] += 1
+        progress.update()
+
+        # subsampling read-set
+        if prob_accept is not None and prob_accept < unif():
+            counts['sample'] += 1
+            continue
+
+        # skip sequences which are too short to analyse
+        seq_len = len(_seq)
+        if seq_len < 2 * k_size + site_size + 1:
+            counts['short'] += 1
+            continue
+
+        # search for the site
+        _seq = _seq.upper()
+        _ix = _seq.find(site)
+        # no site found
+        if _ix == -1:
+            yield _seq, None, _id, seq_len
+        # only report sites which meet flank constraints
+        elif k_size <= _ix <= (seq_len - (k_size + site_size)):
+            yield _seq, _ix, _id, seq_len
+        else:
+            counts['flank'] += 1
+
+
+def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
+            sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
             output_table: str = None, report_path: str = None, library_kit: str = 'generic') -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
@@ -178,12 +327,13 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         
     :param enzyme: the enzyme used during digestion
     :param kmer_db: the jellyfish kmer database
-    :param read_list: the list of read files in FastQ format.
+    :param read_files: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
     :param max_freq_quantile: ignore kmers with kmer frequencies above this quantile
     :param threads: use additional threads for supported steps
+    :param max_obs: the maximum number of reads to inspect
     :param output_table: if not None, write the full pandas table to the specified path
     :param report_path: append a report in single-line JSON format to the given path.
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
@@ -239,154 +389,12 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         outer = np.array(outer)
         return max(1, inner.min()), max(1, outer.min())
 
-    class Counter(object):
-        def __init__(self, **extended_fields):
-            self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
-            self.counts.update(extended_fields)
-
-        def __getitem__(self, item: str):
-            return self.counts[item]
-
-        def __setitem__(self, key: str, value: int):
-            assert key in self.counts, 'Key value {} was not found'.format(key)
-            self.counts[key] = value
-
-        def __iadd__(self, other):
-            if isinstance(other, Counter):
-                _counts = other.counts
-            elif isinstance(other, dict):
-                _counts = other
-            else:
-                raise RuntimeError()
-            for k, v in _counts.items():
-                self.counts[k] += v
-            return self
-
-        def update(self, _dict):
-            for k, v in _dict.items():
-                self.counts[k] = v
-
-        def analysed(self) -> int:
-            return self.counts['all'] - self.counts['sample']
-
-        def accepted(self) -> int:
-            return self.analysed() - self.rejected()
-
-        def rejected(self) -> int:
-            return self.counts['short'] + self.counts['flank'] + self.counts['ambig'] + self.counts['high_cov']
-
-        def count(self, category: str) -> int:
-            """
-            Return the number of counts in a particular category (analysed, rejected or ...)
-            :param category: the category
-            :return: the counts of category
-            """
-            if category == 'analysed':
-                return self.analysed()
-            elif category == 'rejected':
-                return self.rejected()
-            elif category == 'accepted':
-                return self.accepted()
-            else:
-                return self.counts[category]
-
-        def fraction(self, category: str, against: str = 'analysed') -> float:
-            """
-            Return the category's fraction compared to one of (accepted, all, analysed).
-            :param category: the category (numerator)
-            :param against: the denominator
-            :return: a fraction [0,1]
-            """
-            if against == 'accepted':
-                return self.count(category) / self.accepted()
-            elif against == 'all':
-                return self.count(category) / self.counts['all']
-            elif against == 'analysed':
-                return self.count(category) / self.analysed()
-            else:
-                raise RuntimeError('parameter \"against\" must be one of [accepted, analysed or all]')
-
-    def next_read(filename: str, site: str, k_size: int,
-                  prob_accept: float, progress, counts: Counter) -> (str, Optional[int], str, int):
-        """
-        Create a generator function which returns sequence data site positions
-        from a FastQ file.
-        :param filename: the fastq file, compressed or not
-        :param site: the target site to find in reads, eg GATCGATC
-        :param k_size: the k-mer size used in the counting database
-        :param prob_accept: probability threshold used to subsample the full read-set
-        :param progress: progress bar for user feedback
-        :param counts: a tracker class for various rejection conditions
-        :return: yield tuple of (sequence, site_position, read_id, sequence length)
-        """
-        reader = read_seq(open_input(filename))
-        site_size = len(site)
-
-        _all = 0
-        _flank = 0
-        _sample = 0
-        _short = 0
-        for _id, _seq, _qual in reader:
-
-            _all += 1
-            progress.update()
-
-            # subsampling read-set
-            if prob_accept is not None and prob_accept < unif():
-                _sample += 1
-                continue
-
-            # skip sequences which are too short to analyse
-            seq_len = len(_seq)
-            if seq_len < 2 * k_size + site_size + 1:
-                _short += 1
-                continue
-
-            # search for the site
-            _seq = _seq.upper()
-            _ix = _seq.find(site)
-            # no site found
-            if _ix == -1:
-                yield _seq, None, _id, seq_len
-            # only report sites which meet flank constraints
-            elif k_size <= _ix <= (seq_len - (k_size + site_size)):
-                yield _seq, _ix, _id, seq_len
-            else:
-                _flank += 1
-
-        counts.update({'all': _all, 'sample': _sample, 'short': _short, 'flank': _flank})
-
-    def get_kmer_size(filename: str) -> int:
-        """
-        Retrieve the k-mer size used in a library by reading the first record.
-        This assumes all mers within the library have the same k-mer size.
-        :param filename:
-        :return: the size of the k-mer used in a Jellyfish library
-        """
-        iter_mer = dna_jellyfish.ReadMerFile(filename)
-        current_mer = iter_mer.mer()
-        k_size = current_mer.k()
-        del iter_mer
-        return k_size
-
-    def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -> int:
-        """
-        Get a cutoff value for high frequency kmers by calling out to Jellyfish.
-        The external call produces a histogram of kmer frequency, from which Pandas is used to
-        calculate a quantile cut-off.
-
-        :param filename: A jellyfish k-mer database
-        :param q: the threshold quantile
-        :param threads: number of concurrent threads to use
-        :return: maximum frequency cut-off
-        """
-        proc = subprocess.Popen(['jellyfish', 'histo', '-t{}'.format(threads), filename],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            max_cov = pandas.read_csv(proc.stdout, sep=' ', names=['cov', 'count'])['cov'].quantile(q=q)
-            return round(float(max_cov))
-        except Exception as e:
-            raise RuntimeError('Encountered a problem while analyzing kmer distribution. [{}]'.format(e))
+    def set_progress_description():
+        """ Convenience method for setting tqdm progress bar description """
+        if len(read_files) > 1:
+            progress.set_description('Progress (file {})'.format(n))
+        else:
+            progress.set_description('Progress')
 
     # Currently there is only special logic for Phase kits
     # whose proximity inserts appear to possess a non-uniform
@@ -433,13 +441,6 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     dna_jellyfish.MerDNA_k(k_size)
     query_jf = dna_jellyfish.QueryMerFile(kmer_db)
 
-    # either count the reads or use the information provided by the user.
-    n_reads = 0
-    for reads in read_list:
-        logger.info('Counting reads in {}'.format(reads))
-        n_reads += count_sequences(reads, 'fastq', max_cpu=threads)
-    logger.info('Found {:,} reads to analyse'.format(n_reads))
-
     # probability of acceptance for subsampling
     if sample_rate is None or sample_rate == 1:
         logger.info('Accepting all usable reads')
@@ -449,7 +450,6 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
     # set up random number generation
     random_state = init_random_state(seed)
-    unif = random_state.uniform
     randint = random_state.randint
 
     starts_with_cutsite = 0
@@ -457,31 +457,46 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
     logger.info('Beginning analysis...')
 
-    if len(read_list) > 1:
-        initial_desc = 'Progress (file 1)'
+    # count the available reads if not max_obs not set
+    if max_obs is not None:
+        logger.info('Sampling a maximum of {} observations'.format(max_obs))
+        max_obs = np.linspace(0, max_obs, len(read_files) + 1, dtype=np.int)
+        if len(read_files) > 1:
+            logger.debug('Sampling observations equally from each of the {} read files'.format(len(read_files)))
+        # prepare the progress bar
+        progress = tqdm.tqdm(total=max_obs[-1])
     else:
-        initial_desc = 'Progress'
+        n_reads = 0
+        for reads in read_files:
+            logger.info('Counting reads in {}'.format(reads))
+            n_reads += count_sequences(reads, 'fastq', max_cpu=threads)
+        logger.info('Found {:,} reads to analyse'.format(n_reads))
+        # prepare the progress bar
+        progress = tqdm.tqdm(total=n_reads)
 
-    with tqdm.tqdm(desc=initial_desc, total=n_reads) as progress:
+    analysis_counter = Counter()
+    coverage_obs = []
 
-        analysis_counter = Counter()
+    try:
 
-        cov_obs = []
-        for n, reads in enumerate(read_list, 1):
+        read_count = analysis_counter.counts
 
-            if n > 1:
-                progress.set_description('Progress (file {})'.format(n))
+        for n, reads in enumerate(read_files, 1):
 
-            read_counter = Counter()
+            set_progress_description()
 
             # set up the generator over FastQ reads, with sub-sampling
-            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress, read_counter)
+            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress,
+                                  analysis_counter, random_state)
 
             while True:
 
                 try:
                     seq, ix, _id, seq_len = next(fq_reader)
                 except StopIteration:
+                    if progress is not None:
+                        progress.close()
+                    progress = None
                     break
 
                 if seq.startswith(cut_site):
@@ -506,7 +521,7 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
                     # too many tries occurred, abandon this sequence
                     if _attempts >= 3:
-                        read_counter.counts['ambig'] += 1
+                        analysis_counter.counts['ambig'] += 1
                         continue
 
                 # junction containing reads, categorised as hic for simplicity
@@ -516,25 +531,36 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
                     # abandon this sequence if it contains an N
                     if 'N' in seq[ix - k_size: ix + k_size + junc_size]:
-                        read_counter.counts['ambig'] += 1
+                        analysis_counter.counts['ambig'] += 1
                         continue
 
                 mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size, min_cov=1)
 
                 # avoid regions with pathologically high coverage
                 if mean_inner > max_coverage or mean_outer > max_coverage:
-                    read_counter.counts['high_cov'] += 1
+                    analysis_counter.counts['high_cov'] += 1
                     continue
 
                 cumulative_length += seq_len
 
                 # record this observation
-                cov_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id))
+                coverage_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id))
 
-            if read_counter.fraction('rejected') > 0.9:
-                logger.warning('More than 90% of reads were rejected in the file {}'.format(reads))
+                if max_obs is not None and read_count['all'] >= max_obs[n]:
+                    break
 
-            analysis_counter += read_counter
+            if max_obs is not None and read_count['all'] >= max_obs[-1]:
+                raise MaxObsLimit
+
+    except MaxObsLimit:
+        if progress is not None:
+            progress.close()
+            progress = None
+        if max_obs is not None and analysis_counter.count('all') >= max_obs[-1]:
+            logger.info('Reached user-defined observation limit [{}]'.format(max_obs[-1]))
+
+    if analysis_counter.fraction('rejected') > 0.9:
+        logger.warning('More than 90% of reads were rejected')
 
     #
     # Reporting
@@ -543,7 +569,7 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         'mode': 'kmer',
         'runtime_info': runtime_info(),
         'input_args': {'kmer_db': kmer_db,
-                       'read_list': read_list,
+                       'read_list': read_files,
                        'seed': seed,
                        'sample_rate': sample_rate,
                        'max_coverage': max_coverage,
@@ -587,7 +613,7 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
                             analysis_counter.fraction('accepted') * 100))
 
         # lets do some tabular munging, making sure that our categories are explicit
-        all_df = pandas.DataFrame(cov_obs)
+        all_df = pandas.DataFrame(coverage_obs)
         # make read_type categorical so we will always see values for both when counting
         all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
 
@@ -611,18 +637,7 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
         mean_read_len = cumulative_length / analysis_counter.count('accepted')
         report['mean_readlen'] = mean_read_len
-        logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
-        unobserved_fraction = 1 - observed_fraction(int(mean_read_len), mean_insert,
-                                                    k_size, junc_size, is_phase)
-
-        rv = np.random.uniform(size=len(all_df)) > unobserved_fraction
-        all_df = all_df.loc[(rv & (all_df.read_type == 'wgs')) | (all_df.read_type == 'hic')].copy()
-
-        count_rtype = all_df.groupby('read_type').size()
-        report['n_without_junc'] = count_rtype.wgs
-        report['n_with_junc'] = count_rtype.hic
-        logger.info('Break down after unobs correction: wgs {:,} junction {:,}'
-                    .format(count_rtype.wgs, count_rtype.hic))
+        logger.info('Observed mean read length: {:.0f}nt'.format(mean_read_len))
 
         # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
         all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
@@ -649,13 +664,8 @@ def analyse(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
         logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
                     .format(hic_frac['mean'] * 100, hic_frac['error'] * 100))
 
-        # mean_read_len = cumulative_length / analysis_counter.count('accepted')
-        # report['mean_readlen'] = mean_read_len
-        # logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
-
         if mean_insert is not None:
-            unobserved_fraction = 1 - observed_fraction(int(mean_read_len), mean_insert,
-                                                        k_size, junc_size, is_phase)
+            unobserved_fraction = 1 - observed_fraction(is_phase, int(mean_read_len), mean_insert, k_size, junc_size)
 
             if unobserved_fraction < 0:
                 unobserved_fraction = 0
