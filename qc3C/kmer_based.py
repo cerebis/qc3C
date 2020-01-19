@@ -494,9 +494,6 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                 try:
                     seq, ix, _id, seq_len = next(fq_reader)
                 except StopIteration:
-                    if progress is not None:
-                        progress.close()
-                    progress = None
                     break
 
                 if seq.startswith(cut_site):
@@ -553,11 +550,12 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                 raise MaxObsLimit
 
     except MaxObsLimit:
+        if max_obs is not None and analysis_counter.count('all') >= max_obs[-1]:
+            logger.info('Reached user-defined observation limit [{}]'.format(max_obs[-1]))
+    finally:
         if progress is not None:
             progress.close()
             progress = None
-        if max_obs is not None and analysis_counter.count('all') >= max_obs[-1]:
-            logger.info('Reached user-defined observation limit [{}]'.format(max_obs[-1]))
 
     if analysis_counter.fraction('rejected') > 0.9:
         logger.warning('More than 90% of reads were rejected')
