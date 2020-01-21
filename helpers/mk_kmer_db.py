@@ -7,10 +7,12 @@ import subprocess
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser('Make a Jellyfish kmer database')
+    parser.add_argument('-t', '--threads', default=1, type=int,
+                        help='Number of threads [1]')
     parser.add_argument('-k', '--kmer-size', default=24, type=int,
-                            help='Library kmer size [24]')
+                        help='Library kmer size [24]')
     parser.add_argument('-o', '--output', required=True, 
-                            help='Output database name')
+                        help='Output database name')
     parser.add_argument('FASTQ', nargs='+', help='FastQ read file')
     args = parser.parse_args()
 
@@ -32,8 +34,8 @@ if __name__ == '__main__':
         stdout.write('Requested kmer size is: {}\n'.format(args.kmer_size))
         stdout.write('Input FastQ files: {}\n'.format(' '.join(args.FASTQ)))
         stdout.write('Output library file: {}\n'.format(args.output))
-        subprocess.check_call(['jellyfish', 'count', '-m', str(args.kmer_size), '-s', '2G', 
-                               '-C', '-o', args.output, '-g', gen_file],
+        subprocess.check_call(['jellyfish', 'count', '-t', str(args.threads), '-m', str(args.kmer_size),
+                               '-s', '2G', '-C', '-o', args.output, '-g', gen_file],
                               stdout=stdout, stderr=subprocess.STDOUT)
         stdout.write('Finished\n')
     print('Finished')
