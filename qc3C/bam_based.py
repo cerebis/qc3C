@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo, CutSitesDB
-from qc3C.utils import init_random_state, warn_if, write_jsonline, observed_fraction
+from qc3C.utils import init_random_state, write_jsonline, observed_fraction
 from qc3C._version import runtime_info
 
 logger = logging.getLogger(__name__)
@@ -551,22 +551,23 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     long_bins = (1000, 5000, 10000)
     read_counts = {'full_align': 0, 'early_term': 0, 'no_site': 0}
     class_counts = {'dangling': 0, 'self_circle': 0, 'religation': 0, 'ffrr_invalid': 0,
-                    'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0, 'valid': 0, 'invalid': 0}
+                    'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0}
     enzyme_counts = {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
-                     'is_split': 0, 'partial_readthru': 0}
+                     'is_split': 0}
 
     n_accepted_obs = 0
 
     # begin with a guess for insert length
     short_median_est = 300
 
+    logger.info('Beginning analysis...')
+
     pair_parser = read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
                              min_mapq=min_mapq, min_match=1, min_reflen=500,
                              no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
                              threads=threads, count_reads=count_reads, show_progress=show_progress)
 
-    logger.info('Beginning analysis...')
-
+    all_pairs = []
     try:
 
         for r1, r2 in pair_parser:
@@ -589,8 +590,6 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                     else:
                         class_counts['ffrr_invalid'] += 1
 
-                    class_counts['invalid'] += 1
-
                 else:
 
                     # proper orientation
@@ -604,10 +603,10 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                     else:
                         class_counts['ffrr_valid'] += 1
 
-                    class_counts['valid'] += 1
-
                 # when separation has been determined or estimated
                 if d is not None and d > 0:
+
+                    all_pairs.append(d)
 
                     # track the number of pairs observed for the requested separation distances
                     if d >= long_bins[2]:
@@ -686,16 +685,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
 
                         enzyme_counts['cs_term'] += 1
 
-                        # look for partial junctions, depending on how much
-                        # flanking sequence a read has available
-                        if ri.is_reverse:
-                            spare = ri.query_alignment_start
-                        else:
-                            spare = ri.query_length - ri.query_alignment_end
-
                         m = junction_match_length(seq, ri, ligation_info)
-                        if (m < max_match and m == spare) or m == max_match:
-                            enzyme_counts['partial_readthru'] += 1
 
                         # for full matches, keep a separate tally
                         if m == max_match:
@@ -856,6 +846,16 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                 .format(class_counts['fr_valid'],
                         class_counts['fr_valid'] / n_cis_pairs * 100))
 
+    uninf_pairs = class_counts['dangling'] + class_counts['self_circle'] + \
+                  class_counts['ffrr_invalid'] + class_counts['religation']
+
+    logger.info('Number of uninformative pairs: {:,}  ({:#.4g}% of cis)'
+                .format(uninf_pairs, uninf_pairs / n_cis_pairs * 100))
+
+    inf_pairs = class_counts['ffrr_valid'] + class_counts['rf_valid'] + class_counts['fr_valid']
+    logger.info('Number of informative pairs: {:,}  ({:#.4g}% of cis)'
+                .format(inf_pairs, inf_pairs / n_cis_pairs * 100))
+
     # by default, we assume no fraction has gone unobserved
     if short_count == 0:
         emp_mean = None
@@ -902,7 +902,6 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     enz_stats = {'cs_start': enzyme_counts['cs_start'],
                  'cs_term': enzyme_counts['cs_term'],
                  'cs_full': enzyme_counts['cs_full'],
-                 'partial_readthru': enzyme_counts['partial_readthru'],
                  'read_thru': enzyme_counts['read_thru'],
                  'is_split':  enzyme_counts['is_split'],
                  'upper_bound': enzyme_counts['cs_term'] - enzyme_counts['cs_full'],
@@ -919,29 +918,10 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                 .format(enz,
                         ligation_info.elucidation,
                         ligation_info.vestigial))
-    logger.info('For {}, the expected fraction by random chance at 50% GC: {:#.3f}%'
-                .format(enz,
-                        1 / 4 ** ligation_info.vest_len * 100))
     logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
                 .format(enz,
                         enzyme_counts['cs_term'],
                         enzyme_counts['cs_term'] / n_paired_reads * 100))
-    logger.info('For {}, number of paired reads that fully aligned and end with cut-site remnant: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['cs_full'],
-                        enzyme_counts['cs_full'] / n_paired_reads * 100))
-
-    delta_cs = enzyme_counts['cs_term'] - enzyme_counts['cs_full']
-    p_ub = delta_cs / n_paired_reads
-    logger.info('For {}, upper bound of read-thru events: {:,} ({:#.4g}%)'
-                .format(enz,
-                        delta_cs,
-                        delta_cs / n_paired_reads * 100))
-
-    logger.info('For {}, number of paired reads whose alignment ends with partial read-thru: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['partial_readthru'],
-                        enzyme_counts['partial_readthru'] / n_paired_reads * 100))
 
     p_obs = enzyme_counts['read_thru'] / n_paired_reads
     logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
@@ -953,31 +933,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                         enzyme_counts['is_split'],
                         enzyme_counts['is_split'] / n_paired_reads * 100))
 
-    enz_stats['fraction'] = {'read_thru': p_obs, 'upper_bound': p_ub}
-
-    logger.info('For {} the raw estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
-                .format(enz,
-                        p_obs * 100,
-                        p_ub * 100))
-
-    enz_stats['adj_fraction'] = {}
-    if unobs_frac is None:
-        logger.info('For {} there were not enough observations, no adjustment will be made to Hi-C fraction'
-                    .format(enz))
-        enz_stats['adj_fraction'].update({'read_thru': None, 'upper_bound': None})
-    elif unobs_frac > 0:
-        enz_stats['adj_fraction'].update({
-            'read_thru': p_obs * (1 / (1 - unobs_frac)),
-            'upper_bound': p_ub * (1 / (1 - unobs_frac))
-        })
-
-        logger.info('For {} the adjusted estimation of Hi-C fraction: ({:#.4g} - {:#.4g}%)'
-                    .format(enz,
-                            p_obs * (1 / (1 - unobs_frac)) * 100,
-                            p_ub * (1 / (1 - unobs_frac)) * 100))
-
     # long-range bin counts, with formatting to align fields
-
     field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
     logger.info('Long-range intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
                 .format(*long_bins, w=field_width))
@@ -997,3 +953,5 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     # append report to file
     if report_path is not None:
         write_jsonline(report_path, report)
+
+    np.savetxt('all_pairs.txt', np.array(all_pairs, dtype=np.int), fmt='%d')
