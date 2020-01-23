@@ -43,8 +43,8 @@ def main():
                                help='Write output files to this folder [.]')
     global_parser.add_argument('--write-report', default=False, action='store_true',
                                help='Create a result report in JSONLines format')
-    global_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
-                               help='The library kit type [generic]')
+    # global_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
+    #                            help='The library kit type [generic]')
     global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action=UniqueStore, required=True,
                                help='A case-sensitive NEB enzyme name')
 
@@ -143,7 +143,7 @@ def main():
             bam.analyse(args.bam, args.fasta, args.enzyme,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
                         min_mapq=args.min_mapq, max_pairs=args.max_obs, report_path=report_path,
-                        library_kit=args.library_kit)
+                        library_kit='generic')
 
         # Kmer based analysis
         elif args.command == 'kmer':
@@ -158,7 +158,7 @@ def main():
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
-                         max_obs=args.max_obs, library_kit=args.library_kit)
+                         max_obs=args.max_obs, library_kit='generic')
 
     except ApplicationException as ex:
         logger.error(str(ex))
