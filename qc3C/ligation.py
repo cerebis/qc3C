@@ -115,11 +115,12 @@ class CutSitesDB(MutableMapping):
 
         with contextlib.closing(Bio.SeqIO.parse(open_input(self.fasta_file), 'fasta')) as seq_iter:
 
+            logger.info('Building cut-site database from supplied enzyme and reference sequences')
+
             if self.use_tqdm:
                 total_seq = count_sequences(self.fasta_file, 'fasta', 4)
                 seq_iter = tqdm.tqdm(seq_iter, total=total_seq)
 
-            logger.info('Building cut-site database from supplied enzyme and reference sequences')
             cutsite_db = {}
             for seq in seq_iter:
                 cutsite_db[seq.id] = CutSites(seq, self.enzyme)
