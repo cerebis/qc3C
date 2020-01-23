@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size: int = 0, junc_size: int = 0) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
-    the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size how much
-    of each read can be inspected.
+    the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
+    how much of each read can be inspected.
 
     :param read_len: the average read-length
     :param mean_insert: the average insert (or fragment) length
@@ -42,7 +42,7 @@ def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size
         """
         frag_mask = np.zeros(mean_insert, dtype=np.bool)
         read_mask = np.zeros(read_len, dtype=np.bool)
-        x_min, x_max = kmer_size + junc_size, read_len - kmer_size
+        x_min, x_max = kmer_size, read_len - kmer_size - junc_size
         # create a read mask that represents the region of the read which can be interrogated
         read_mask[x_min:x_max] = True
         # create a fragment mask by transferring this silhouette to either end of the fragment
@@ -85,7 +85,7 @@ def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size
         logger.debug('Calculating the observed fraction as a generic library')
 
         # uniform treatment
-        obs_frac = obs_mask.sum() / len(obs_mask)
+        obs_frac = obs_mask.mean()
 
     # sanity checks that should not get invoked
     if obs_frac > 1:
