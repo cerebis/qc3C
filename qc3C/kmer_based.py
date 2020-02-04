@@ -298,7 +298,7 @@ def next_read(filename: str, site: str, k_size: int,
 
         # skip sequences which are too short to analyse
         seq_len = len(_seq)
-        if seq_len < 2 * k_size + site_size + 1:
+        if seq_len < 2 * k_size + site_size + 2:
             counts['short'] += 1
             continue
 
@@ -409,7 +409,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
     logger.info('The enzyme {} with cut-site {} produces an {}nt ligation junction sequence of {}'
                 .format(lig_info.enzyme_name, lig_info.elucidation, lig_info.junc_len, lig_info.junction))
     logger.info('For this k-mer size and enzyme, the flanks are {}nt'.format(flank_size))
-    logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'.format(junc_size + 2 * k_size))
+    logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'.format(junc_size + 2 * k_size + 2))
 
     max_coverage = get_kmer_frequency_cutoff(kmer_db, max_freq_quantile, threads)
     logger.info('Maximum k-mer frequency of {} at quantile {} in Jellyfish library {}'
@@ -694,9 +694,12 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                         .format(mean_insert, *unobs_frac))
 
             report['adj_fraction'] = hic_frac * 1/(1 - unobs_frac)
-
-            logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
-                        .format(*(hic_frac * 1/(1 - unobs_frac)) * 100))
+            if np.any(report['adj_fraction'] > 1):
+                logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
+                report['adj_fraction'] = None
+            else:
+                logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
+                            .format(*(hic_frac * 1/(1 - unobs_frac)) * 100))
 
         report['unobs_frac'] = unobs_frac
 
