@@ -11,7 +11,10 @@ class MaxObsLimit(StopIteration):
 
 class ZeroCoverageException(ApplicationException):
     """Queried observations of K-mer coverage summed to zero"""
-    pass
+    def __init__(self):
+        super(ZeroCoverageException, self).__init__(
+            'Queried observations of K-mer coverage summed to zero')
+
 
 class UnknownLibraryKitException(ApplicationException):
     """The library kit is unknown"""
