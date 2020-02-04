@@ -31,6 +31,7 @@ def main():
     Shared CLI arguments
     """
     global_parser = argparse.ArgumentParser(add_help=False)
+    global_parser.add_argument('-d', '--debug', default=False, action='store_true', help='Enable debug output')
     global_parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
     global_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
                                help='Sample only a proportion of all read-pairs [None]')
@@ -142,7 +143,7 @@ def main():
 
             bam.analyse(args.bam, args.fasta, args.enzyme,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
-                        min_mapq=args.min_mapq, max_pairs=args.max_obs, report_path=report_path,
+                        min_mapq=args.min_mapq, max_obs=args.max_obs, report_path=report_path,
                         library_kit='generic')
 
         # Kmer based analysis
@@ -162,8 +163,12 @@ def main():
 
     except ApplicationException as ex:
         logger.error(str(ex))
+        if args.debug:
+            logger.exception(ex)
         sys.exit(1)
 
     except Exception as ex:
-        logger.exception(ex)
+        logger.error(str(ex))
+        if args.debug:
+            logger.exception(ex)
         sys.exit(1)
