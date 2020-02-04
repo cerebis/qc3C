@@ -15,7 +15,8 @@ from .exceptions import ApplicationException
 logger = logging.getLogger(__name__)
 
 
-def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size: int = 0, junc_size: int = 0) -> float:
+def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
+                      junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -26,10 +27,12 @@ def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size
     :param kmer_size: the requested k-mer size
     :param junc_size: the junction size
     :param is_phase: whether or not the library was constructed using Phase's kit
+    :param is_single: the observational set has been reduced to a single read per fragment
     :return: the observed fraction [0, 1]
     """
 
-    def make_observable_mask(read_len: int, mean_insert: int, kmer_size: int, junc_size: int) -> np.ndarray:
+    def make_observable_mask(read_len: int, mean_insert: int, kmer_size: int,
+                             junc_size: int, is_single: bool) -> np.ndarray:
         """
         Use a mask to calculate the proportion of a fragment which can be interrogated
         due to the need for a sliding window around any observed junction sequence.
@@ -38,22 +41,25 @@ def observed_fraction(is_phase: bool, read_len: int, mean_insert: int, kmer_size
         :param mean_insert: the average insert (or fragment) length
         :param kmer_size: the requested k-mer size
         :param junc_size: the junction size
+        :param is_single: the observational set has been reduced to a single read per fragment
         :return:
         """
         frag_mask = np.zeros(mean_insert, dtype=np.bool)
         read_mask = np.zeros(read_len, dtype=np.bool)
-        x_min, x_max = kmer_size, read_len - kmer_size - junc_size
+        x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
         # create a read mask that represents the region of the read which can be interrogated
         read_mask[x_min:x_max] = True
         # create a fragment mask by transferring this silhouette to either end of the fragment
         # handling the edge-case where the insert length is less than the read length
         a = read_len if read_len < mean_insert else mean_insert
         frag_mask[:a] |= read_mask[:a]
-        frag_mask[-a:] |= read_mask[::-1][-a:]
+        if not is_single:
+            # treat both ends if paired
+            frag_mask[-a:] |= read_mask[::-1][-a:]
         # return the fragment mask
         return frag_mask
 
-    obs_mask = make_observable_mask(read_len, mean_insert, kmer_size, junc_size)
+    obs_mask = make_observable_mask(read_len, mean_insert, kmer_size, junc_size, is_single)
 
     if is_phase:
 
@@ -234,6 +240,8 @@ def write_jsonline(fpath: str, obj):
             return int(o)
         elif isinstance(o, np.float64):
             return float(o)
+        elif isinstance(o, np.ndarray):
+            return [default(oi) for oi in o]
         raise TypeError(o.__class__)
 
     with open(fpath, 'at+') as fp:
