@@ -22,18 +22,32 @@ Jellyfish is a well documented project, so if you encounter problems with its in
 All of these steps should complete without error.
 
 ```bash
-# Step 1
+# Step 1 - obtain the source package for jellyfish
 wget https://github.com/gmarcais/Jellyfish/releases/download/v2.2.10/jellyfish-2.2.10.tar.gz 
-# Step 2
+
+# Step 2 - extract the archive and enter the project folder
 tar xzf jellyfish-2.2.10.tar.gz && cd jellyfish-2.2.10
-# Step 3
+
+# Step 3 - point pkg-config to the information it requires to build extensions
 export PKG_CONFIG_PATH=$PWD:$PKG_CONFIG_PATH
-# Step 4
-./configure && sudo make install
-# Step 5
+
+# Step 4 - configure jellyfish and install. 
+# You must define the prefix path, which might be /usr/local (requires root) or $HOME. 
+# This location will be baked into the package conifguration and subsequently the 
+# python bindings. 
+./configure --prefix=[choose a location] && make -j4
+
+# Step 5 - install the jellyfish executable, depending on the location this may 
+# require root access.
+make install
+
+# Step 5 - go to the python bindings subfolder
 cd swig/python
-# Step 6
-python3 setup.py build && sudo python3 setup.py install
+
+# Step 6 - build the python bindings and install.
+# Note: you will be requied to install qc3C using the same python installation as 
+# was used here.
+python3 setup.py build && python3 setup.py install
 ```
 
 **Installation comments**
