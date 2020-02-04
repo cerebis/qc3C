@@ -489,7 +489,7 @@ def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: Ligati
 
 
 def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
-            seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_pairs: int = None,
+            seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_obs: int = None,
             threads: int = 1, report_path: str = None, library_kit: str = 'generic') -> None:
     """
     analyse a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
@@ -503,7 +503,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     :param seed: a random integer seed
     :param sample_rate: consider only a portion of all pairs [0..1]
     :param min_mapq: the minimum acceptable mapping quality
-    :param max_pairs: the maximum number of accepted pairs to inspect
+    :param max_obs: the maximum number of accepted pairs to inspect
     :param threads: the number of threads used in accessing the bam file
     :param report_path: append a report in single-line JSON format to the given path.
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
@@ -535,14 +535,14 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
 
     random_state = init_random_state(seed)
 
-    if max_pairs is not None:
+    if max_obs is not None:
         show_progress = count_reads = False
     else:
         show_progress = count_reads = True
 
     mp_progress = None
-    if max_pairs is not None:
-        mp_progress = tqdm.tqdm(total=max_pairs, desc='Pairs')
+    if max_obs is not None:
+        mp_progress = tqdm.tqdm(total=max_obs, desc='Pairs')
 
     cumulative_length = 0
     short_sum = 0
@@ -567,7 +567,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                              no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
                              threads=threads, count_reads=count_reads, show_progress=show_progress)
 
-    all_pairs = []
+    # all_pairs = []
     try:
 
         for r1, r2 in pair_parser:
@@ -606,7 +606,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                 # when separation has been determined or estimated
                 if d is not None and d > 0:
 
-                    all_pairs.append(d)
+                    # all_pairs.append(d)
 
                     # track the number of pairs observed for the requested separation distances
                     if d >= long_bins[2]:
@@ -696,16 +696,16 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                     if _no_site:
                         read_counts['no_site'] += 1
 
-            if max_pairs is not None:
+            if max_obs is not None:
                 n_accepted_obs += 1
                 mp_progress.update()
-                if n_accepted_obs >= max_pairs:
+                if n_accepted_obs >= max_obs:
                     raise MaxObsLimit
 
     except MaxObsLimit:
         if mp_progress is not None:
             mp_progress.close()
-            logger.info('Reached user-defined observation limit [{}]'.format(max_pairs))
+            logger.info('Reached user-defined observation limit [{}]'.format(max_obs))
 
     # some shorthand variables which will be used repeatedly
     n_pairs_accepted = pair_parser.pair_filter.count('accepted')
@@ -724,7 +724,8 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                        'enzyme': enzyme_name,
                        'seed': seed,
                        'sample_rate': sample_rate,
-                       'min_mapq': min_mapq},
+                       'min_mapq': min_mapq,
+                       'max_obs': max_obs},
         'n_parsed_reads': pair_parser.read_filter.count('all'),
         'n_analysed_reads': pair_parser.read_filter.analysed(),
         'n_accepted_reads': pair_parser.read_filter.count('accepted'),
@@ -883,7 +884,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
         # this will be used later as an indicator of absence
         unobs_frac = None
     else:
-        unobs_frac = 1 - observed_fraction(is_phase, int(mean_read_len), int(emp_mean))
+        unobs_frac = 1 - observed_fraction(int(mean_read_len), int(emp_mean), is_phase)
 
         if unobs_frac < 0:
             unobs_frac = 0
@@ -904,7 +905,6 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                  'cs_full': enzyme_counts['cs_full'],
                  'read_thru': enzyme_counts['read_thru'],
                  'is_split':  enzyme_counts['is_split'],
-                 'upper_bound': enzyme_counts['cs_term'] - enzyme_counts['cs_full'],
                  'elucidation': ligation_info.elucidation,
                  'vestigial': ligation_info.vestigial}
     report['enzyme_stats'] = {enz: enz_stats}
@@ -954,4 +954,4 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     if report_path is not None:
         write_jsonline(report_path, report)
 
-    np.savetxt('all_pairs.txt', np.array(all_pairs, dtype=np.int), fmt='%d')
+    # np.savetxt('all_pairs.txt', np.array(all_pairs, dtype=np.int), fmt='%d')
