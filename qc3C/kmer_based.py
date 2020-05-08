@@ -2,12 +2,14 @@ import bz2
 import gzip
 import numpy as np
 import pandas
+import re
 import subprocess
 import tqdm
 import logging
 
 from collections import namedtuple, defaultdict
-from typing import TextIO, Optional, Dict
+from typing import TextIO, Optional, Dict, List, Tuple
+from typing.re import Pattern as PatternType
 from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
 from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
 from qc3C.utils import init_random_state, write_jsonline, count_sequences
@@ -21,7 +23,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos', 'seq', 'read_len'])
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos', 'seq', 'read_len', 'junc_seq'])
 
 
 class Counter(object):
@@ -267,24 +269,32 @@ def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -
         raise RuntimeError('Encountered a problem while analyzing kmer distribution. [{}]'.format(e))
 
 
-def next_read(filename: str, site: str, k_size: int,
+def next_read(filename: str, pattern: PatternType, longest_site: int, k_size: int,
               prob_accept: float, progress, counts: Counter,
-              random_state: np.random.RandomState) -> (str, Optional[int], str, int):
+              random_state: np.random.RandomState) -> Tuple[str,
+                                                            Optional[int],
+                                                            str,
+                                                            int,
+                                                            Optional[int],
+                                                            Optional[str]]:
     """
     Create a generator function which returns sequence data site positions
     from a FastQ file.
     :param filename: the fastq file, compressed or not
-    :param site: the target site to find in reads, eg GATCGATC
+    :param pattern: regex pattern for matching any enzyme
+    :param longest_site: the length of the longest cutsite used in digestion
     :param k_size: the k-mer size used in the counting database
     :param prob_accept: probability threshold used to subsample the full read-set
     :param progress: progress bar for user feedback
     :param counts: a tracker class for various rejection conditions
     :param random_state: random state for subsampling
-    :return: yield tuple of (sequence, site_position, read_id, sequence length)
+    :return: yield tuple of (sequence, site position, read id, seq length, junc length, junc seq)
     """
     reader = read_seq(open_input(filename))
-    site_size = len(site)
     unif = random_state.uniform
+
+    # initialise the search method from a compiled pattern supporting ambiguous bases
+    any_site = pattern.search
 
     for _id, _seq, _qual in reader:
 
@@ -298,25 +308,32 @@ def next_read(filename: str, site: str, k_size: int,
 
         # skip sequences which are too short to analyse
         seq_len = len(_seq)
-        if seq_len < 2 * k_size + site_size + 2:
+        if seq_len < 2 * k_size + longest_site + 2:
             counts['short'] += 1
             continue
 
         # search for the site
         _seq = _seq.upper()
-        _ix = _seq.find(site)
+
+        # TODO this (and previous approach) only matches the first instance of the site within the read.
+        #  There is no reason that this would be the correct location.
+        _match = any_site(_seq)
         # no site found
-        if _ix == -1:
-            yield _seq, None, _id, seq_len
-        # only report sites which meet flank constraints
-        # elif k_size <= _ix <= (seq_len - (k_size + site_size)):
-        elif k_size + 1 <= _ix <= seq_len - (k_size + site_size + 1):
-            yield _seq, _ix, _id, seq_len
+        if _match is None:
+            yield _seq, None, _id, seq_len, None, None
         else:
-            counts['flank'] += 1
+            _ix, _end = _match.span()
+            _junc_len = _end - _ix
+            _junc_seq = _match.group()
+            # only report sites which meet flank constraints
+            # elif k_size <= _ix <= (seq_len - (k_size + site_size)):
+            if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
+                yield _seq, _ix, _id, seq_len, _junc_len, _junc_seq
+            else:
+                counts['flank'] += 1
 
 
-def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
+def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
             output_table: str = None, report_path: str = None, library_kit: str = 'generic',
             num_bootstraps: int = 50) -> None:
@@ -324,7 +341,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
         
-    :param enzyme: the enzyme used during digestion
+    :param enzyme_names: the enzymes used during digestion (max 2)
     :param kmer_db: the jellyfish kmer database
     :param read_files: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
@@ -358,13 +375,22 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
 
         outer = np.empty(shape=6, dtype=np.int)
         inner = np.empty(shape=3, dtype=np.int)
-        flank = (k - site_size)//2
+        r_shift = 0
+        l_flank = r_flank = (k - site_size) // 2
+        if (k - site_size) % 2 != 0:
+            l_flank += 1
+            r_shift = 1
+
+        assert ix - k > 0, 'smallest valid index is: {}'.format(k+1)
+        assert ix + site_size + r_shift + k - 1 < len(seq), \
+            'largest valid index is: {}'.format(len(seq) - site_size - k - r_shift)
+
         for i in range(-1, 2):
             si = seq[ix - k + i: ix + i]
             outer[i+1] = get_kmer_cov(si)
-            si = seq[ix + site_size + i: ix + site_size + k + i]
+            si = seq[ix + site_size + r_shift + i: ix + site_size + k + r_shift + i]
             outer[i+4] = get_kmer_cov(si)
-            si = seq[ix - flank + i: ix + site_size + flank + i]
+            si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
             inner[i+1] = get_kmer_cov(si)
 
         sum_inner = inner.sum()
@@ -396,28 +422,32 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
     else:
         raise UnknownLibraryKitException(library_kit)
 
+    assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
+    enzymes = []
+    for en in enzyme_names:
+        enzymes.append(get_enzyme_instance(en))
+
     # Determine the junction, treat as uppercase
-    lig_info = ligation_junction_seq(get_enzyme_instance(enzyme))
-    junc_site = lig_info.junction
-    junc_size = lig_info.junc_len
-    cut_site = lig_info.cut_site
+    cutsite_info, lig_info, any_cutsite, any_junction = ligation_junction_seq(*enzymes, no_ambig=False)
+    longest_site = max(li.junc_len for li in lig_info.values())
 
     k_size = get_kmer_size(kmer_db)
-    flank_size = (k_size - junc_size) // 2
 
     logger.info('Found a k-mer size of {}nt for the Jellyfish library at {}'.format(k_size, kmer_db))
-    logger.info('The enzyme {} with cut-site {} produces an {}nt ligation junction sequence of {}'
-                .format(lig_info.enzyme_name, lig_info.elucidation, lig_info.junc_len, lig_info.junction))
-    logger.info('For this k-mer size and enzyme, the flanks are {}nt'.format(flank_size))
-    logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'.format(junc_size + 2 * k_size + 2))
 
     max_coverage = get_kmer_frequency_cutoff(kmer_db, max_freq_quantile, threads)
     logger.info('Maximum k-mer frequency of {} at quantile {} in Jellyfish library {}'
                 .format(max_coverage, max_freq_quantile, kmer_db))
 
-    # some sanity checks.
-    assert k_size > junc_size, 'Kmer size must be larger the the junction size'
-    assert (k_size - junc_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
+    for li in lig_info.values():
+        # some sanity checks.
+        assert k_size > li.junc_len, 'k-mer size must be larger than any junction size'
+        # assert (k_size - li.junc_len) % 2 == 0, 'k-mer size and junction sizes should match (even/even) or (odd/odd)'
+
+        logger.info('The enzyme combination {} produces an {}nt ligation junction sequence of {}'
+                    .format(li.signature, li.junc_len, li.junction))
+        logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'
+                    .format(li.junc_len + 2 * k_size + 2))
 
     # for efficiency, disable sampling if rate is 1
     if sample_rate == 1:
@@ -468,6 +498,8 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
 
     obs_fragments = defaultdict(int)
 
+    any_site_match = any_cutsite.match
+
     try:
 
         for n, reads in enumerate(read_files, 1):
@@ -475,17 +507,17 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
             set_progress_description()
 
             # set up the generator over FastQ reads, with sub-sampling
-            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress,
+            fq_reader = next_read(reads, any_junction, longest_site, k_size, sample_rate, progress,
                                   analysis_counter, random_state)
 
             while True:
 
                 try:
-                    seq, ix, _id, seq_len = next(fq_reader)
+                    seq, ix, _id, seq_len, junc_len, junc_seq = next(fq_reader)
                 except StopIteration:
                     break
 
-                if seq.startswith(cut_site):
+                if any_site_match(seq) is not None:
                     starts_with_cutsite += 1
 
                 # if the read contains no junction, we might still use it
@@ -494,13 +526,16 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
 
                     rtype = 'wgs'
 
+                    # assume longest junction for these cases
+                    junc_len = longest_site
+
                     # try to find a randomly selected region which does not contain
                     # ambiguous bases. Skip the read if we fail in a few attempts
                     _attempts = 0
                     while _attempts < 3:
-                        ix = randint(k_size + 1, seq_len - (k_size + junc_size))
+                        ix = randint(k_size + 1, seq_len - (k_size + longest_site))
                         # if no N within the subsequence, then accept it
-                        if 'N' not in seq[ix - k_size: ix + k_size + junc_size]:
+                        if 'N' not in seq[ix - k_size: ix + k_size + longest_site]:
                             break
                         # otherwise keep trying
                         _attempts += 1
@@ -516,12 +551,12 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                     rtype = 'hic'
 
                     # abandon this sequence if it contains an N
-                    if 'N' in seq[ix - k_size: ix + k_size + junc_size]:
+                    if 'N' in seq[ix - k_size: ix + k_size + junc_len]:
                         analysis_counter.counts['ambig'] += 1
                         continue
 
                 try:
-                    mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size)
+                    mean_inner, mean_outer = collect_coverage(seq, ix, junc_len, k_size)
                 except ZeroCoverageException:
                     no_coverage += 1
                     continue
@@ -536,7 +571,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                 obs_fragments[_id] += 1
 
                 # record this observation
-                coverage_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id, seq_len))
+                coverage_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id, seq_len, junc_seq))
 
                 if max_obs is not None and analysis_counter.analysed() >= sampled_obs[n]:
                     break
@@ -627,7 +662,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
         z_outer = all_df.mean_outer == 0
         nz_either = ~(z_inner | z_outer)
         all_df = all_df[nz_either]
-        logger.warning('Removed rows with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
+        logger.debug('Removed rows with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
             sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
         # check that we have some of both read types
@@ -652,13 +687,14 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
         logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
                     .format(starts_with_cutsite,
                             starts_with_cutsite / analysis_counter.count('accepted') * 100))
+
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                    .format(1 / 4 ** lig_info.site_len * 100))
-        logger.info('Number of accepted reads containing the junction sequence: {:,} ({:#.4g}% of accepted)'
+                    .format(sum(1 / 4 ** ci.site_len for ci in cutsite_info.values()) * 100))
+        logger.info('Number of accepted reads containing potential junctions: {:,} ({:#.4g}% of accepted)'
                     .format(count_rtype.hic,
                             count_rtype.hic / analysis_counter.count('accepted') * 100))
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                    .format(1 / 4 ** lig_info.junc_len * 100))
+                    .format(sum(1 / 4 ** li.junc_len for li in lig_info.values()) * 100))
 
         n_read_obs = sum(obs_fragments.values())
         n_frag_obs = len(obs_fragments)
@@ -673,7 +709,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
                 all_df.sample(frac=0.8, replace=False, random_state=random_state)
                       .drop_duplicates('seq'))
             _sample_est.append(pvalue_expectation(_smpl))
-            _sample_unobs.append(unobserved_fraction(_smpl, k_size, junc_size, mean_insert))
+            _sample_unobs.append(unobserved_fraction(_smpl, k_size, longest_site, mean_insert))
         _sample_est = pandas.DataFrame(_sample_est)
         # Use the 95% quantiles from the bootstrap samples
         hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
@@ -683,7 +719,7 @@ def analyse(enzyme: str, kmer_db: str, read_files: list, mean_insert: int, seed:
         logger.info('Estimated raw Hi-C read fraction via p-value sum method: 95% CI [{:#.4g},{:#.4g}]'
                     .format(*hic_frac * 100))
 
-        if np.any(unobs_frac < 0):
+        if np       .any(unobs_frac < 0):
             unobs_frac = 0
             logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
                            'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'

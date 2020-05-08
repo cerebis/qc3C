@@ -3,6 +3,7 @@ leven
 numba
 numpy
 pandas
+psutil
 pysam
 scipy
 tqdm

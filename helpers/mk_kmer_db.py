@@ -3,6 +3,9 @@
 import os
 import argparse
 import subprocess
+import tempfile
+
+# from qc3C.jellyfish import mk_database
 
 if __name__ == '__main__':
 
@@ -19,24 +22,23 @@ if __name__ == '__main__':
     if not args.output.endswith('.jf'):
         args.output = '{}.jf'.format(args.output)
 
-    gen_file = '{}.gen'.format(args.output)
-    with open(gen_file, 'wt') as gen_h:
+    with tempfile.NamedTemporaryFile(mode='wt') as gen_h:
         for fn in args.FASTQ:
             gen_h.write('zcat -f {}\n'.format(fn))
 
-    out_dir = os.path.dirname(os.path.realpath(args.output))
-    if not out_dir:
-        raise IOError('Failed to determine containing output directory')
+        out_dir = os.path.dirname(os.path.realpath(args.output))
+        if not out_dir:
+            raise IOError('Failed to determine containing output directory')
 
-    print('Beginning library creation')
-    with open(os.path.join(out_dir, 'mk_kmer_db.log'), 'w+') as stdout:
-        stdout.write('Beginning library creation\n')
-        stdout.write('Requested kmer size is: {}\n'.format(args.kmer_size))
-        stdout.write('Input FastQ files: {}\n'.format(' '.join(args.FASTQ)))
-        stdout.write('Output library file: {}\n'.format(args.output))
-        subprocess.check_call(['jellyfish', 'count', '-t', str(args.threads), '-m', str(args.kmer_size),
-                               '-s', '2G', '-C', '-o', args.output, '-g', gen_file],
-                              stdout=stdout, stderr=subprocess.STDOUT)
-        stdout.write('Finished\n')
-    print('Finished')
+        print('Beginning library creation')
+        with open(os.path.join(out_dir, 'mk_kmer_db.log'), 'w+') as stdout:
+            stdout.write('Beginning library creation\n')
+            stdout.write('Requested kmer size is: {}\n'.format(args.kmer_size))
+            stdout.write('Input FastQ files: {}\n'.format(' '.join(args.FASTQ)))
+            stdout.write('Output library file: {}\n'.format(args.output))
+            subprocess.check_call(['jellyfish', 'count', '-t', str(args.threads), '-m', str(args.kmer_size),
+                                   '-s', '100M', '-C', '-o', args.output, '-g', gen_h.name],
+                                  stdout=stdout, stderr=subprocess.STDOUT)
+            stdout.write('Finished\n')
+        print('Finished')
 

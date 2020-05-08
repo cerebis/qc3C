@@ -2,6 +2,7 @@ import os
 import logging
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
+from qc3C.jellyfish import mk_database
 
 from qc3C.exceptions import ApplicationException
 from qc3C._version import version_stamp
@@ -14,7 +15,9 @@ __table_name__ = 'obs_table.tsv.gz'
 
 def main():
     import argparse
+    import subprocess
     import sys
+    import tempfile
 
     class UniqueStore(argparse.Action):
         def __init__(self, *args, **kwargs):
@@ -33,21 +36,23 @@ def main():
     global_parser = argparse.ArgumentParser(add_help=False)
     global_parser.add_argument('-d', '--debug', default=False, action='store_true', help='Enable debug output')
     global_parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
-    global_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
-                               help='Sample only a proportion of all read-pairs [None]')
-    global_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
-                               help='Random seed used in sampling the read-set [None]')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads [1]')
-    global_parser.add_argument('-M', '--max-obs', type=int, action=UniqueStore,
+
+    analysis_parser = argparse.ArgumentParser(add_help=False)
+    analysis_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
+                               help='Sample only a proportion of all read-pairs [None]')
+    analysis_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
+                               help='Random seed used in sampling the read-set [None]')
+    analysis_parser.add_argument('-M', '--max-obs', type=int, action=UniqueStore,
                                help='Stop after collecting this many observations')
-    global_parser.add_argument('--output-path', metavar='PATH', default='.',
-                               help='Write output files to this folder [.]')
-    global_parser.add_argument('--write-report', default=False, action='store_true',
+    analysis_parser.add_argument('--write-report', default=False, action='store_true',
                                help='Create a result report in JSONLines format')
-    # global_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
+    # analysis_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
     #                            help='The library kit type [generic]')
-    global_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action=UniqueStore, required=True,
-                               help='A case-sensitive NEB enzyme name')
+    analysis_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
+                               help='A case-sensitive NEB enzyme name (can be used multiple times)')
+    analysis_parser.add_argument('--output-path', metavar='PATH', default='.',
+                               help='Write output files to this folder [.]')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
@@ -55,8 +60,12 @@ def main():
     subparsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
                                        help='choose an analysis stage for further options')
     subparsers.required = False
-    cmd_bam = subparsers.add_parser('bam', parents=[global_parser], description='Alignment-based analysis.')
-    cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser], description='Kmer-based analysis.')
+    cmd_bam = subparsers.add_parser('bam', parents=[global_parser, analysis_parser],
+                                    description='Alignment-based analysis.')
+    cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser, analysis_parser],
+                                     description='Kmer-based analysis.')
+    cmd_mkdb = subparsers.add_parser('mkdb', parents=[global_parser],
+                                     description='Create kmer database.')
 
     """
     CLI for BAM based analysis
@@ -81,7 +90,19 @@ def main():
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
                           help='FastQ format reads used in making the kmer database '
-                               '(Use multiple times for multiple files)')
+                               '(can be used multiple times)')
+
+    """
+    CLI for creating kmer database
+    """
+    cmd_mkdb.add_argument('-s', '--hash-size', default='10M',
+                          help='Initial hash size (eg. 10M, 2G) [10M]')
+    cmd_mkdb.add_argument('-k', '--kmer-size', default=24, type=int,
+                          help='Library kmer size [24]')
+    cmd_mkdb.add_argument('-o', '--output', required=True,
+                          help='Output database name')
+    cmd_mkdb.add_argument('FASTQ', nargs='+', help='FastQ read file')
+    cmd_mkdb.add_argument('--output-path', metavar='PATH', default='.', help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -126,16 +147,18 @@ def main():
     logger.debug(sys.version.replace('\n', ' '))
     logger.debug('Command line: {}'.format(' '.join(sys.argv)))
 
-    report_path = None
-    if args.write_report:
-        report_path = os.path.join(args.output_path, __report_name__)
+    if hasattr(args, 'write_report'):
+        report_path = None
+        if args.write_report:
+            report_path = os.path.join(args.output_path, __report_name__)
 
     try:
 
         if args.threads < 1:
             parser.error('The number of threads must be greater than 1')
 
-        if args.sample_rate is not None and not (0 < args.sample_rate <= 1):
+        if hasattr(args, 'sample_rate') and \
+                args.sample_rate is not None and not (0 < args.sample_rate <= 1):
             parser.error('Sample rate must be within the range (0,1]')
 
         # BAM based analysis
@@ -160,6 +183,16 @@ def main():
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
                          max_obs=args.max_obs, library_kit='generic')
+
+        elif args.command == 'mkdb':
+
+            if not args.output.endswith('.jf'):
+                args.output = '{}.jf'.format(args.output)
+            if os.path.exists(args.output):
+                logger.error('Output path already exists: {}'.format(args.output))
+                sys.exit(1)
+
+            mk_database(args.output, args.FASTQ, args.kmer_size, args.hash_size, args.threads)
 
     except ApplicationException as ex:
         logger.error(str(ex))

@@ -34,6 +34,7 @@ setuptools.setup(
         'numba',
         'numpy',
         'pandas',
+        'psutil',
         'pysam',
         'scipy',
         'tqdm'
