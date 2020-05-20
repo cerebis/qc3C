@@ -6,10 +6,11 @@ import pysam
 import subprocess
 import tqdm
 
-from typing import Optional, Tuple
+from collections import OrderedDict
+from typing import Optional, Tuple, List
 from abc import ABC, abstractmethod
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance, LigationInfo, CutSitesDB
+from qc3C.ligation import get_enzyme_instance, CutSitesDB, Digest
 from qc3C.utils import init_random_state, write_jsonline, observed_fraction
 from qc3C._version import runtime_info
 
@@ -466,29 +467,7 @@ class read_pairs(object):
             self.close()
 
 
-def junction_match_length(seq: str, read: pysam.AlignedSegment, lig_info: LigationInfo) -> int:
-    """
-    For a given read, whose 3' end goes beyond the end of its mapped alignment, check if the
-    immediately following nt match sequence the proximity ligation junction. Return the number of
-    nts which matched.
-    :param seq: the sequence of the read
-    :param read: the read mapping object
-    :param lig_info: the ligation details for a given enzyme
-    :return: the number of matching nt (to PL junction) after the end of the alignment
-    """
-    if read.is_reverse:
-        i = read.query_length - read.query_alignment_start
-    else:
-        i = read.query_alignment_end
-
-    j = lig_info.vest_len
-    while i < len(seq) and j < lig_info.junc_len and seq[i] == lig_info.junction[j]:
-        i += 1
-        j += 1
-    return j - lig_info.vest_len
-
-
-def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
+def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
             seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_obs: int = None,
             threads: int = 1, report_path: str = None, library_kit: str = 'generic') -> None:
     """
@@ -497,9 +476,9 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     Hi-C signal. Here signal is the proportion of proximity ligation pairs relative to
     shotgun pairs within the mapped read-sets.
 
+    :param enzyme_names: the enzymes used during digestion (max 2)
     :param bam_file: the path to the bam file
     :param fasta_file: reference sequences
-    :param enzyme_name: the name of the enzyme used in Hi-C library creation
     :param seed: a random integer seed
     :param sample_rate: consider only a portion of all pairs [0..1]
     :param min_mapq: the minimum acceptable mapping quality
@@ -521,10 +500,12 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     else:
         raise UnknownLibraryKitException(library_kit)
 
-    enzyme = get_enzyme_instance(enzyme_name)
-    ligation_info = ligation_junction_seq(enzyme)
+    assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
+    enzymes = [get_enzyme_instance(_en) for _en in enzyme_names]
 
-    cutsite_db = CutSitesDB(enzyme, fasta_file, use_cache=True, use_tqdm=True)
+    digest = Digest(*enzymes, no_ambig=False)
+
+    cutsite_db = CutSitesDB(fasta_file, enzymes, use_cache=True, use_tqdm=True)
 
     # for efficiency, disable sampling if rate is 1
     if sample_rate == 1 or sample_rate is None:
@@ -552,7 +533,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     read_counts = {'full_align': 0, 'early_term': 0, 'no_site': 0}
     class_counts = {'dangling': 0, 'self_circle': 0, 'religation': 0, 'ffrr_invalid': 0,
                     'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0}
-    enzyme_counts = {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
+    digest_counts = {'cs_full': 0, 'cs_term': 0, 'cs_start': 0, 'read_thru': 0,
                      'is_split': 0}
 
     n_accepted_obs = 0
@@ -566,6 +547,13 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                              min_mapq=min_mapq, min_match=1, min_reflen=500,
                              no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
                              threads=threads, count_reads=count_reads, show_progress=show_progress)
+
+    startswith_cutsite = digest.cutsite_searcher('startswith')
+    startswith_junction = digest.junction_searcher('startswith')
+    endswith_vestigial = digest.vestigial_searcher('endswith')
+
+    junction_tracker = OrderedDict({ji: 0 for ji in digest.unambiguous_junctions()})
+    vestigial_tracker = OrderedDict({vi: 0 for vi in digest.unambiguous_vestigial()})
 
     # all_pairs = []
     try:
@@ -656,13 +644,15 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
 
                     # check for cut-site
                     _no_site = True
-                    if seq.startswith(ligation_info.cut_site):
-                        enzyme_counts['cs_start'] += 1
+                    if startswith_cutsite(seq) is not None:
+                        digest_counts['cs_start'] += 1
 
-                    if seq.endswith(ligation_info.vestigial):
+                    vest_match = endswith_vestigial(seq)
+                    if vest_match is not None:
+                        vestigial_tracker[vest_match.group()] += 1
                         _no_site = False
-                        enzyme_counts['cs_full'] += 1
-                        enzyme_counts['cs_term'] += 1
+                        digest_counts['cs_full'] += 1
+                        digest_counts['cs_term'] += 1
 
                     if _no_site:
                         read_counts['no_site'] += 1
@@ -675,24 +665,28 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
                     # check for cut-site and potentially the junction
                     _no_site = True
 
-                    if seq.startswith(ligation_info.cut_site):
-                        enzyme_counts['cs_start'] += 1
+                    if startswith_cutsite(seq):
+                        digest_counts['cs_start'] += 1
 
-                    max_match = ligation_info.junc_len - ligation_info.vest_len
-
-                    if aln_seq.endswith(ligation_info.vestigial):
+                    vest_match = endswith_vestigial(aln_seq)
+                    if vest_match is not None:
+                        vestigial_tracker[vest_match.group()] += 1
                         _no_site = False
-
-                        enzyme_counts['cs_term'] += 1
-
-                        m = junction_match_length(seq, ri, ligation_info)
-
+                        digest_counts['cs_term'] += 1
+                        vstart = vest_match.start()
+                        # index of vestigial start within full read sequence
+                        if ri.is_reverse:
+                            i = vstart + ri.query_length - ri.query_alignment_end
+                        else:
+                            i = vstart + ri.query_alignment_start
+                        # now, does the read continue and contain the full junction
+                        junc_match = startswith_junction(seq[i:])
                         # for full matches, keep a separate tally
-                        if m == max_match:
-                            enzyme_counts['read_thru'] += 1
+                        if junc_match is not None:
+                            junction_tracker[junc_match.group()] += 1
+                            digest_counts['read_thru'] += 1
                             if ri.has_tag('SA'):
-                                enzyme_counts['is_split'] += 1
-
+                                digest_counts['is_split'] += 1
                     if _no_site:
                         read_counts['no_site'] += 1
 
@@ -721,7 +715,7 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
         'runtime_info': runtime_info(),
         'input_args': {'bam_file': bam_file,
                        'fasta_file': fasta_file,
-                       'enzyme': enzyme_name,
+                       'enzymes': enzyme_names,
                        'seed': seed,
                        'sample_rate': sample_rate,
                        'min_mapq': min_mapq,
@@ -762,6 +756,8 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     #
     # Log the results
     #
+
+
 
     logger.info('Number of parsed reads: {:,}'
                 .format(pair_parser.read_filter.count('all')))
@@ -898,40 +894,38 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
 
         report['unobs_frac'] = unobs_frac
 
-    # enzyme statistics
-    enz = ligation_info.enzyme_name
-    enz_stats = {'cs_start': enzyme_counts['cs_start'],
-                 'cs_term': enzyme_counts['cs_term'],
-                 'cs_full': enzyme_counts['cs_full'],
-                 'read_thru': enzyme_counts['read_thru'],
-                 'is_split':  enzyme_counts['is_split'],
-                 'elucidation': ligation_info.elucidation,
-                 'vestigial': ligation_info.vestigial}
-    report['enzyme_stats'] = {enz: enz_stats}
+    # digest statistics
+    digest_stats = {'cs_start': digest_counts['cs_start'],
+                 'cs_term': digest_counts['cs_term'],
+                 'cs_full': digest_counts['cs_full'],
+                 'read_thru': digest_counts['read_thru'],
+                 'is_split':  digest_counts['is_split'],
+                 'vestigial': digest.unique_vestigial()}
+    report['digest_stats'] = digest_stats
 
-    logger.info('For {}, number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['cs_start'],
-                        enzyme_counts['cs_start'] / n_paired_reads * 100))
+    for ci in digest.cutsites.values():
+        logger.info('The enzyme {} has cut-site {}'.format(ci.name, ci.site))
+    for ji in digest.junctions.values():
+        logger.info('The enzymatic combination {} produces the {}nt ligation junction {}'
+                    .format(ji.signature, ji.junc_len, ji.junction))
 
-    logger.info('For {}, cut-site {} has remnant {}'
-                .format(enz,
-                        ligation_info.elucidation,
-                        ligation_info.vestigial))
-    logger.info('For {}, number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['cs_term'],
-                        enzyme_counts['cs_term'] / n_paired_reads * 100))
+    logger.info('The number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
+                .format(digest_counts['cs_start'],
+                        digest_counts['cs_start'] / n_paired_reads * 100))
 
-    p_obs = enzyme_counts['read_thru'] / n_paired_reads
-    logger.info('For {}, number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['read_thru'],
+    logger.info('The digest contains the following possible remnants {}'
+                .format(digest_stats['vestigial']))
+    logger.info('The number of paired reads whose alignment ends with cut-site remnant: {:,} ({:#.4g}%)'
+                .format(digest_counts['cs_term'],
+                        digest_counts['cs_term'] / n_paired_reads * 100))
+
+    p_obs = digest_counts['read_thru'] / n_paired_reads
+    logger.info('The number of paired reads with observable read-thru: {:,} ({:#.4g}%)'
+                .format(digest_counts['read_thru'],
                         p_obs*100))
-    logger.info('For {}, number of paired reads with read-thru and split alignment: {:,} ({:#.4g}%)'
-                .format(enz,
-                        enzyme_counts['is_split'],
-                        enzyme_counts['is_split'] / n_paired_reads * 100))
+    logger.info('The number of paired reads with read-thru and split alignment: {:,} ({:#.4g}%)'
+                .format(digest_counts['is_split'],
+                        digest_counts['is_split'] / n_paired_reads * 100))
 
     # long-range bin counts, with formatting to align fields
     field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
@@ -949,6 +943,11 @@ def analyse(bam_file: str, fasta_file: str, enzyme_name: str,
     report['separation_histogram'] = {'counts': long_counts.tolist(),
                                       'vs_all_cis': vs_all_cis.tolist(),
                                       'vs_accepted': vs_accepted.tolist()}
+
+    for j, n in junction_tracker.items():
+        logger.info(f'For junction sequence {j} found: {n}')
+    for v, n in vestigial_tracker.items():
+        logger.info(f'For cutsite remnant {v} found: {n}')
 
     # append report to file
     if report_path is not None:
