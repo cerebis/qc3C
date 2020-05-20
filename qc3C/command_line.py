@@ -15,9 +15,7 @@ __table_name__ = 'obs_table.tsv.gz'
 
 def main():
     import argparse
-    import subprocess
     import sys
-    import tempfile
 
     class UniqueStore(argparse.Action):
         def __init__(self, *args, **kwargs):
@@ -30,6 +28,15 @@ def main():
             setattr(namespace, self.dest, values)
             self.count += 1
 
+    def get_output_file_path(input_args, file_name):
+        """
+        Prepare the report path if it has been defined.
+        :param input_args: input arguments
+        :param file_name: the path-less filename
+        :return: return None if write_report is not set, otherwise report path within output path
+        """
+        return None if not input_args.write_report else os.path.join(input_args.output_path, file_name)
+
     """
     Shared CLI arguments
     """
@@ -40,19 +47,19 @@ def main():
 
     analysis_parser = argparse.ArgumentParser(add_help=False)
     analysis_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
-                               help='Sample only a proportion of all read-pairs [None]')
+                                 help='Sample only a proportion of all read-pairs [None]')
     analysis_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
-                               help='Random seed used in sampling the read-set [None]')
+                                 help='Random seed used in sampling the read-set [None]')
     analysis_parser.add_argument('-M', '--max-obs', type=int, action=UniqueStore,
-                               help='Stop after collecting this many observations')
+                                 help='Stop after collecting this many observations')
     analysis_parser.add_argument('--write-report', default=False, action='store_true',
-                               help='Create a result report in JSONLines format')
+                                 help='Create a result report in JSONLines format')
     # analysis_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
     #                            help='The library kit type [generic]')
     analysis_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
-                               help='A case-sensitive NEB enzyme name (can be used multiple times)')
+                                 help='A case-sensitive NEB enzyme name (can be used multiple times)')
     analysis_parser.add_argument('--output-path', metavar='PATH', default='.',
-                               help='Write output files to this folder [.]')
+                                 help='Write output files to this folder [.]')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
@@ -147,11 +154,6 @@ def main():
     logger.debug(sys.version.replace('\n', ' '))
     logger.debug('Command line: {}'.format(' '.join(sys.argv)))
 
-    if hasattr(args, 'write_report'):
-        report_path = None
-        if args.write_report:
-            report_path = os.path.join(args.output_path, __report_name__)
-
     try:
 
         if args.threads < 1:
@@ -164,7 +166,9 @@ def main():
         # BAM based analysis
         if args.command == 'bam':
 
-            bam.analyse(args.bam, args.fasta, args.enzyme,
+            report_path = get_output_file_path(args, __report_name__)
+
+            bam.analyse(args.enzyme, args.bam, args.fasta,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
                         min_mapq=args.min_mapq, max_obs=args.max_obs, report_path=report_path,
                         library_kit='generic')
@@ -172,9 +176,8 @@ def main():
         # Kmer based analysis
         elif args.command == 'kmer':
 
-            table_path = None
-            if args.write_table:
-                table_path = os.path.join(args.output_path, __table_name__)
+            report_path = get_output_file_path(args, __report_name__)
+            table_path = get_output_file_path(args, __table_name__)
 
             if len(set(args.reads)) != len(args.reads):
                 parser.error('Some supplied input read-sets are the same file')
