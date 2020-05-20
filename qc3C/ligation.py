@@ -1,3 +1,4 @@
+import collections
 import contextlib
 import gzip
 import itertools
@@ -12,12 +13,11 @@ import Bio.SeqIO
 
 from Bio.SeqRecord import SeqRecord
 from Bio.Restriction import Restriction
-from collections import namedtuple
+
 from collections.abc import MutableMapping
 from leven import levenshtein
 from numba import jit
 from typing import Dict, List, Optional, Tuple, TypeVar
-from typing.re import Pattern as PatternType
 
 from .exceptions import *
 from .utils import open_input, modification_hash, count_sequences
@@ -31,29 +31,183 @@ EnzymeType = TypeVar('EnzymeType',
                      Restriction.Ov3,
                      Restriction.Defined)
 
-# immutable types used in storing information about enzymatic products in proximity ligation
-EnzymeInfo = namedtuple('enzyme_info',
-                        ('name', 'site', 'site_len'))
+# Information pertaining to an restriction enzyme
+enzyme_info = collections.namedtuple('enzyme_info',
+                                     ('name', 'site', 'site_len'))
 
-LigationInfo = namedtuple('ligation_info',
-                          ('signature', 'junction', 'vestigial', 'junc_len', 'vest_len', 'pattern'))
+# Information pertaining to a Hi-C ligation junction
+ligation_info = collections.namedtuple('ligation_info',
+                                       ('signature', 'junction', 'vestigial', 'junc_len', 'vest_len', 'pattern'))
+
+# Information pertaining to digestion / private class for readability
+digest_info = collections.namedtuple('digest_info', ('enzyme', 'end5', 'end3', 'overhang'))
 
 
-def digest_sequence(enzyme: EnzymeType, seq: SeqRecord, linear: bool = True) -> np.ndarray:
+class Digest(object):
+    """
+    A Hi-C digestion. This can support one or two enzyme digestions and ambiguous nucleotides within
+    the cut-site such as used by Arima.
+    """
+    def __init__(self, enzyme_a: EnzymeType, enzyme_b: EnzymeType = None, no_ambig: bool = True):
+
+        def vestigial_site(enz: EnzymeType, junc: str) -> str:
+            """
+            Determine the part of the 5-prime end cut-site that will remain when a ligation junction is
+            created. Depending on the enzymes involved, this may be the entire cut-site or a smaller portion
+            and begins from the left.
+            """
+            i = 0
+            while i < enz.size and (enz.site[i] == junc[i] or enz.site[i] == 'N'):
+                i += 1
+            return str(junc[:i]).upper()
+
+        def enzyme_ends(enzyme: EnzymeType) -> Tuple[str, str]:
+            """
+            Determine the 5` and 3` ends of a restriction endonuclease. Here, "ends"
+            are the parts of the recognition site not involved in overhang.
+            :param enzyme: Biopython ins
+            :return: a pair of strings containing the 5' and 3' ends
+            """
+            end5, end3 = '', ''
+            ovhg_size = abs(enzyme.ovhg)
+            if ovhg_size > 0 and ovhg_size != enzyme.size:
+                a = abs(enzyme.fst5)
+                if a > enzyme.size // 2:
+                    a = enzyme.size - a
+                end5, end3 = enzyme.site[:a], enzyme.site[-a:]
+            return end5.upper(), end3.upper()
+
+        def junction_duplication(enzyme_a: EnzymeType, enzyme_b: Optional[EnzymeType] = None) -> Dict[str, ligation_info]:
+            """
+            For the enzyme cocktail, generate the set of possible ligation junctions.
+            :param enzyme_a: the first enzyme
+            :param enzyme_b: the optional second enzyme
+            :return: a dictionary of ligation_info objects
+            """
+            end5, end3 = enzyme_ends(enzyme_a)
+            enz_list = [digest_info(enzyme_a, end5, end3, enzyme_a.ovhgseq.upper())]
+
+            if enzyme_b is not None:
+                end5, end3 = enzyme_ends(enzyme_b)
+                enz_list.append(digest_info(enzyme_b, end5, end3, enzyme_b.ovhgseq.upper()))
+
+            _junctions = {}
+            for a, b in itertools.product(enz_list, repeat=2):
+                # the actual sequence
+                _junc_seq = f'{a.end5}{a.overhang}{b.overhang}{b.end3}'
+                if _junc_seq not in _junctions:
+                    _vest_seq = vestigial_site(a.enzyme, _junc_seq)
+                    _junctions[_junc_seq] = ligation_info(f'{a.enzyme}/{b.enzyme}',
+                                                          _junc_seq, _vest_seq,
+                                                          len(_junc_seq), len(_vest_seq),
+                                                          re.compile(_junc_seq.replace('N', '.')))
+            return _junctions
+
+        # test digestion
+        assert not enzyme_a.is_blunt(), 'blunt-ended enzymes are not supported'
+        if enzyme_b is not None:
+            assert not enzyme_b.is_blunt(), 'blunt-ended enzymes are not supported'
+            assert enzyme_a != enzyme_b, 'enzymes a and b are either same enzyme or equisoschizomers'
+
+        if no_ambig:
+            assert not enzyme_a.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
+            if enzyme_b is not None:
+                assert not enzyme_b.is_ambiguous, 'ambiguous symbols in enzymatic site not supported'
+
+        # target cut-sites
+        self.cutsites = {enz.site.upper(): enzyme_info(str(enz), enz.site.upper(), len(enz.site))
+                         for enz in [enzyme_a, enzyme_b] if enz is not None}
+
+        # hi-c ligation junctions
+        self.junctions = junction_duplication(enzyme_a, enzyme_b)
+
+        # prepare regex based matching methods for the various products from ligation
+
+        # cut-sites for the specified enzymes
+        self.any_cutsite = re.compile('({})'.format('|'.join(
+            sorted(self.cutsites, key=lambda x: (-len(x), x))).replace('N', '.')))
+        self.end_cutsite = re.compile('{}$'.format(self.any_cutsite.pattern))
+
+        # Hi-C ligation junctions, which can be any combination of ends made from enzyme cocktail
+        self.any_junction = re.compile('({})'.format('|'.join(
+            sorted(self.junctions, key=lambda x: (-len(x), x))).replace('N', '.')))
+        self.end_junction = re.compile('{}$'.format(self.any_junction.pattern))
+
+        # Digested ends, which are religated will not necessarily possess the entire
+        # cut-site, but will possess a remnant/vestigial sequence
+        self.any_vestigial = re.compile('({})'.format('|'.join(
+            sorted(set([v.vestigial for v in self.junctions.values()]), key=lambda x: (-len(x), x))).replace('N', '.')))
+        self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
+
+    def unique_vestigial(self):
+        return set([ji.vestigial for ji in self.junctions.values()])
+
+    def longest_junction(self):
+        return max(li.junc_len for li in self.junctions.values())
+
+    def unambiguous_junctions(self):
+        junc_list = []
+        for ji in self.junctions:
+            junc_list.extend(Digest._expand_ambiguous(ji))
+        return junc_list
+
+    def unambiguous_vestigial(self):
+        vest_list = []
+        for vi in self.unique_vestigial():
+            vest_list.extend(Digest._expand_ambiguous(vi))
+        return vest_list
+
+    @staticmethod
+    def _expand_ambiguous(s: str) -> List[str]:
+        """
+        Enumerate all sequences when ambiguous bases (N only) are encountered.
+        :param s: a string representing DNA
+        :return: a list of explicit sequences
+        """
+        enum_seq = [s]
+        for i in range(s.count('N')):
+            enum_seq = [si.upper().replace('N', c, 1) for c in 'ACGT' for si in enum_seq]
+        return enum_seq
+
+    def cutsite_searcher(self, method):
+        if method == 'startswith':
+            return self.any_cutsite.match
+        elif method == 'find':
+            return self.any_cutsite.search
+        elif method == 'endswith':
+            return self.end_cutsite.search
+
+    def junction_searcher(self, method):
+        if method == 'startswith':
+            return self.any_junction.match
+        elif method == 'find':
+            return self.any_junction.search
+        elif method == 'endswith':
+            return self.end_junction.search
+
+    def vestigial_searcher(self, method):
+        if method == 'startswith':
+            return self.any_vestigial.match
+        elif method == 'find':
+            return self.any_vestigial.search
+        if method == 'endswith':
+            return self.end_vestigial.search
+
+
+def digest_sequence(seq: SeqRecord, enzymes: List[EnzymeType], linear: bool = True) -> np.ndarray:
     """
     Determine the restriction sites for a given enzyme and sequence. Return 0-based
     array of sites.
 
-    :param enzyme: the case-sensitive enzyme name or Bio.RestrictionType instance
     :param seq: a Bio.SeqRecord object
+    :param enzymes: list of Bio.RestrictionType instances (1 or 2 only)
     :param linear: treat the sequence as being linear (=True) or circular (=False)
     :return: 0-based array of site locations in ascending genomic coordinates
     """
-    if isinstance(enzyme, str):
-        enzyme = get_enzyme_instance(enzyme)
-    sites = np.array(enzyme.search(seq.seq, linear=linear), dtype=np.int32) - 1
-    # although biopython should return sites in ascending order, lets be pedantic
-    return np.sort(sites)
+    # digest the sequence for each enzyme and collect all sites in a single array
+    sites = np.array([_s for _enz in enzymes for _s in _enz.search(seq.seq, linear=linear)], dtype=np.int32) - 1
+    # reoder the sites in ascending order and remove duplicates
+    return np.unique(np.sort(sites))
 
 
 @jit(nopython=True)
@@ -120,7 +274,8 @@ class CutSitesDB(MutableMapping):
 
         with contextlib.closing(Bio.SeqIO.parse(open_input(self.fasta_file), 'fasta')) as seq_iter:
 
-            logger.info('Building cut-site database from supplied enzyme and reference sequences')
+            logger.info('Building cut-site database against reference sequence and {}'.format(
+                ', '.join([str(_enz) for _enz in self.enzymes])))
 
             if self.use_tqdm:
                 total_seq = count_sequences(self.fasta_file, 'fasta', 4)
@@ -128,7 +283,7 @@ class CutSitesDB(MutableMapping):
 
             cutsite_db = {}
             for seq in seq_iter:
-                cutsite_db[seq.id] = CutSites(seq, self.enzyme)
+                cutsite_db[seq.id] = CutSites(seq, self.enzymes)
             self.data = cutsite_db
             self.file_hash = modification_hash(self.fasta_file)
 
@@ -143,12 +298,13 @@ class CutSitesDB(MutableMapping):
             pickle.dump(self, cache_h, pickle.HIGHEST_PROTOCOL)
 
     def _cache_file(self):
-        return '{}_sites_{}'.format(self.fasta_file, str(self.enzyme).lower())
+        return '{}_sites_{}'.format(self.fasta_file, '-'.join(str(_en) for _en in self.enzymes).lower())
 
-    def __init__(self, enzyme, fasta_file, use_cache=False, use_tqdm=False):
+    def __init__(self, fasta_file: str, enzymes: List[EnzymeType], use_cache: bool = False, use_tqdm: bool = False):
 
-        self.enzyme = enzyme
         self.fasta_file = fasta_file
+        # alphabetic order regardless of input order
+        self.enzymes = sorted(enzymes, key=lambda x: str(x))
         self.use_cache = use_cache
         self.use_tqdm = use_tqdm
         self.data = None
@@ -166,7 +322,8 @@ class CutSitesDB(MutableMapping):
                     self.build_db()
                     self.save_cache()
             else:
-                logger.info('No cut-site database cache found')
+                logger.info('No cut-site database cache found for digest involving {}'.format(
+                    ', '.join([str(_enz) for _enz in enzymes])))
                 self.build_db()
                 self.save_cache()
         else:
@@ -176,7 +333,7 @@ class CutSitesDB(MutableMapping):
         return self.data[item]
 
     def __setitem__(self, key, value):
-        self.data[key] = CutSites(value, self.enzyme)
+        self.data[key] = CutSites(value, self.enzymes)
 
     def __delitem__(self, key):
         del self.data[key]
@@ -190,16 +347,16 @@ class CutSitesDB(MutableMapping):
 
 class CutSites(object):
 
-    def __init__(self, seq: SeqRecord, enzyme: EnzymeType):
+    def __init__(self, seq: SeqRecord, enzymes: List[EnzymeType]):
         """
         Instances of this class contain information on the restriction
         digest of the supplied sequence. This can be queried for nearby
         sites, or information on sites related to the given pair.
 
         :param seq: a SeqRecord object
-        :param enzyme: a Bio.Restriction enzyme or NEB-based enzyme name of such
+        :param enzymes: a list of Bio.Restriction enzyme instances (1 or 2 only)
         """
-        self.fwd_sites = digest_sequence(enzyme, seq)
+        self.fwd_sites = digest_sequence(seq, enzymes)
         self.rev_sites = -1 * self.fwd_sites[::-1]
         self.n_sites = self.fwd_sites.shape[0]
 
@@ -297,117 +454,6 @@ def get_enzyme_instance(enz_name: str) -> Restriction.RestrictionType:
         else:
             top = top['name'][top['score'] > 0.7]
         raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
-
-
-def ligation_junction_seq(enzyme_a: EnzymeType, enzyme_b: EnzymeType = None,
-                          spacer: str = '', no_ambig: bool = True) -> Tuple[Dict[str, EnzymeInfo],
-                                                                            Dict[str, LigationInfo],
-                                                                            PatternType,
-                                                                            PatternType]:
-    """
-    Determine the sequence presented after successful enzymatic cleavage and ligation. Due
-    to the use of enzymes which possess non-zero overhang and the subsequent end-fill step
-    the sequence intervening the cut points gets duplicated.
-
-    This method returns the full junction sequence, containing the 3' and 5' residuals
-    and the intervening duplication.
-
-    end5 - dup - end3
-
-    :params enz: biopython restriction instance
-    :params spacer: optional string with which to separate site elements (debugging)
-    :params no_ambig: throws an exception when true and an enzyme contains ambiguous symbols in its recognition site
-    """
-    def vestigial_site(enz: EnzymeType, junc: str) -> str:
-        """
-        Determine the part of the 5-prime end cut-site that will remain when a ligation junction is
-        created. Depending on the enzymes involved, this may be the entire cut-site or a smaller portion
-        and begins from the left.
-        """
-        i = 0
-        while i < enz.size and (enz.site[i] == junc[i] or enz.site[i] == 'N'):
-            i += 1
-        return str(junc[:i]).upper()
-
-    def expand_ambiguous(s: str) -> List[str]:
-        """
-        Enumerate all sequences when ambiguous bases (N only) are encountered.
-        :param s: a string representing DNA
-        :return: a list of explicit sequences
-        """
-        enum_seq = [s]
-        for i in range(s.count('N')):
-            enum_seq = [si.upper().replace('N', c, 1) for c in 'ACGT' for si in enum_seq]
-        return enum_seq
-
-    def enzyme_ends(enzyme: EnzymeType) -> Tuple[str, str]:
-        """
-        Determine the 5` and 3` ends of a restriction endonuclease. Here, "ends"
-        are the parts of the recognition site not involved in overhang.
-        :param enzyme: Biopython ins
-        :return: a pair of strings containing the 5' and 3' ends
-        """
-        end5, end3 = '', ''
-        ovhg_size = abs(enzyme.ovhg)
-        if ovhg_size > 0 and ovhg_size != enzyme.size:
-            a = abs(enzyme.fst5)
-            if a > enzyme.size // 2:
-                a = enzyme.size - a
-            end5, end3 = enzyme.site[:a], enzyme.site[-a:]
-        return end5.upper(), end3.upper()
-
-    # private class for readability
-    DigestInfo = namedtuple('digest_info', ('enzyme', 'end5', 'end3', 'overhang'))
-
-    def junction_duplication(enzyme_a: EnzymeType, enzyme_b: EnzymeType = None,
-                             expand: bool = False) -> Dict[str, LigationInfo]:
-        end5, end3 = enzyme_ends(enzyme_a)
-        if expand:
-            enz_list = [DigestInfo(enzyme_a, end5, end3, si) for si in expand_ambiguous(enzyme_a.ovhgseq)]
-        else:
-            enz_list = [DigestInfo(enzyme_a, end5, end3, enzyme_a.ovhgseq.upper())]
-
-        if enzyme_b is not None:
-            end5, end3 = enzyme_ends(enzyme_b)
-            if expand:
-                enz_list.extend([DigestInfo(enzyme_b, end5, end3, si) for si in expand_ambiguous(enzyme_b.ovhgseq)])
-            else:
-                enz_list.append(DigestInfo(enzyme_b, end5, end3, enzyme_b.ovhgseq.upper()))
-
-        _junctions = {}
-        for a, b in itertools.product(enz_list, repeat=2):
-            _junc_seq = f'{a.end5}{a.overhang}{b.overhang}{b.end3}'
-            if _junc_seq not in _junctions:
-                _vest_seq = vestigial_site(a.enzyme, _junc_seq)
-                _junctions[_junc_seq] = LigationInfo(f'{a.enzyme}' if a.enzyme== b.enzyme else f'{a.enzyme}/{b.enzyme}',
-                                                     _junc_seq, _vest_seq,
-                                                     len(_junc_seq), len(_vest_seq),
-                                                     re.compile(_junc_seq.replace('N', '.')))
-        return _junctions
-
-    # test digestion
-    assert not enzyme_a.is_blunt(), 'blunt-ended enzymes are not supported'
-    if enzyme_b is not None:
-        assert not enzyme_b.is_blunt(), 'blunt-ended enzymes are not supported'
-        assert enzyme_a != enzyme_b, 'enzymes a and b are either same enzyme or equisoschizomers'
-
-    if no_ambig:
-        assert not enzyme_a.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
-        if enzyme_b is not None:
-            assert not enzyme_b.is_ambiguous, 'ambiguous symbols in enzymatic site not supported'
-
-    cutsites = {enz.site.upper(): EnzymeInfo(str(enz), enz.site.upper(), len(enz.site))
-                for enz in [enzyme_a, enzyme_b] if enz is not None}
-
-    junctions = junction_duplication(enzyme_a, enzyme_b)
-
-    # build regex patterns for local matching any site or junction
-    any_cutsite = re.compile('({})'.format('|'.join(
-        sorted(cutsites, key=lambda x: (-len(x), x))).replace('N', '.')))
-    any_junction = re.compile('({})'.format('|'.join(
-        sorted(junctions, key=lambda x: (-len(x), x))).replace('N', '.')))
-
-    return cutsites, junctions, any_cutsite, any_junction
 
 
 def restriction_enzyme_by_site(size: int = None) -> dict:
