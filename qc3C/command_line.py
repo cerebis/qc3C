@@ -28,15 +28,6 @@ def main():
             setattr(namespace, self.dest, values)
             self.count += 1
 
-    def get_output_file_path(input_args, file_name):
-        """
-        Prepare the report path if it has been defined.
-        :param input_args: input arguments
-        :param file_name: the path-less filename
-        :return: return None if write_report is not set, otherwise report path within output path
-        """
-        return None if not input_args.write_report else os.path.join(input_args.output_path, file_name)
-
     """
     Shared CLI arguments
     """
@@ -166,7 +157,7 @@ def main():
         # BAM based analysis
         if args.command == 'bam':
 
-            report_path = get_output_file_path(args, __report_name__)
+            report_path = None if not args.write_report else os.path.join(args.output_path, __report_name__)
 
             bam.analyse(args.enzyme, args.bam, args.fasta,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
@@ -176,8 +167,8 @@ def main():
         # Kmer based analysis
         elif args.command == 'kmer':
 
-            report_path = get_output_file_path(args, __report_name__)
-            table_path = get_output_file_path(args, __table_name__)
+            report_path = None if not args.write_report else os.path.join(args.output_path, __report_name__)
+            table_path = None if not args.write_table else os.path.join(args.output_path, __table_name__)
 
             if len(set(args.reads)) != len(args.reads):
                 parser.error('Some supplied input read-sets are the same file')
