@@ -15,6 +15,24 @@ from .exceptions import ApplicationException
 logger = logging.getLogger(__name__)
 
 
+def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
+    """
+    A simple estimate of the observed fraction seen from the reads over a set of analyzed
+    fragments. Here, the total fragment extent is estimated by N_frag * mean(frag). The user
+    is expected to computed the total extent of all observed reads.
+
+    The mean fragment size should be empirically deteremined from data, rather than rely on
+    a value quoted by a sequencing facility. These are often wrong. Software that assumes
+    shotgun data will also do poorly at estimating the mean fragment size when inspecting
+    Hi-C reads.
+
+    :param obs_extent: total extent of reads analyzed - Sum(len(read_i))
+    :param mean_frag_size: the mean fragment size
+    :param n_fragments: the number of unique fragments analyzed
+    :return: the observed fraction
+    """
+    return obs_extent / (mean_frag_size * n_fragments)
+
 def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
                       junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> float:
     """

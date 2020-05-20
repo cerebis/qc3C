@@ -11,7 +11,7 @@ from typing import Optional, Tuple, List
 from abc import ABC, abstractmethod
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
 from qc3C.ligation import get_enzyme_instance, CutSitesDB, Digest
-from qc3C.utils import init_random_state, write_jsonline, observed_fraction
+from qc3C.utils import init_random_state, write_jsonline, simple_observed_fraction
 from qc3C._version import runtime_info
 
 logger = logging.getLogger(__name__)
@@ -880,7 +880,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         # this will be used later as an indicator of absence
         unobs_frac = None
     else:
-        unobs_frac = 1 - observed_fraction(int(mean_read_len), int(emp_mean), is_phase)
+        unobs_frac = 1 - simple_observed_fraction(cumulative_length, emp_mean, n_pairs_accepted)
 
         if unobs_frac < 0:
             unobs_frac = 0

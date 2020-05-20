@@ -10,7 +10,7 @@ from collections import namedtuple, defaultdict
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
 from qc3C.ligation import get_enzyme_instance, Digest
-from qc3C.utils import init_random_state, write_jsonline, count_sequences
+from qc3C.utils import init_random_state, write_jsonline, count_sequences, simple_observed_fraction
 from qc3C._version import runtime_info
 
 try:
@@ -151,26 +151,6 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
             if last:  # reach EOF before reading enough quality
                 yield name, seq, None  # yield a fasta record instead
                 break
-
-
-def unobserved_fraction(df: pandas.DataFrame, k_size: int, site_size: int, frag_size: int) -> float:
-    """
-    Pragmatically calculate the unobserved fraction. Depending on the supplied table of
-    observations, we sum the total read extent, minus the flanking constraints. The
-    user supplied fragment size is then attributed to each observation.
-
-    :param df: observation table
-    :param k_size: kmer size
-    :param site_size: junction size
-    :param frag_size: user-supplied fragment size
-    :return: an estimate of the unobserved fraction
-    """
-    # the observed extent per read, where we remove the end regions
-    # which cannot be inspected due to the need to inspect flanks
-    n_obs = len(df)
-    obs_extent = df.read_len.sum() - n_obs * ((k_size + 1) + (k_size + site_size + 1))
-    # as we cannot determine fragment size, we must rely on the user supplied value
-    return 1 - obs_extent / (n_obs * frag_size)
 
 
 def assign_empirical_pvalues_all(_df):
@@ -701,7 +681,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 all_df.sample(frac=0.8, replace=False, random_state=random_state)
                       .drop_duplicates('seq'))
             _sample_est.append(pvalue_expectation(_smpl))
-            _sample_unobs.append(unobserved_fraction(_smpl, k_size, longest_site, mean_insert))
+            _obs_extent = _smpl.read_len.sum()
+            _sample_unobs.append(1 - simple_observed_fraction(_obs_extent, mean_insert, n_frag_obs))
         _sample_est = pandas.DataFrame(_sample_est)
         # Use the 95% quantiles from the bootstrap samples
         hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
