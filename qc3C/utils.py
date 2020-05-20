@@ -142,7 +142,7 @@ def count_sequences(file_name: str, fmt: str, max_cpu: int = 1) -> int:
     return n
 
 
-def modification_hash(file_path):
+def modification_hash(file_path: str) -> str:
     """
     Create a string hash for a given file using base file name,
     modification time and size as a proxy for file changes.
