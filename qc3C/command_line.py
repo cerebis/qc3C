@@ -118,6 +118,7 @@ def main():
     # root log listens to everything
     root = logging.getLogger('')
     root.setLevel(logging.DEBUG)
+    logging.getLogger('numba').setLevel(logging.INFO)
 
     # log message format
     formatter = logging.Formatter(fmt='%(levelname)-8s | %(asctime)s | %(name)7s | %(message)s')
