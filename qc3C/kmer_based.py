@@ -9,7 +9,7 @@ import logging
 from collections import namedtuple, defaultdict
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
-from qc3C.ligation import get_enzyme_instance, Digest
+from qc3C.ligation import Digest
 from qc3C.utils import init_random_state, write_jsonline, count_sequences, simple_observed_fraction
 from qc3C._version import runtime_info
 
@@ -249,6 +249,7 @@ def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -
 
 def next_read(filename: str, searcher, longest_site: int, k_size: int,
               prob_accept: float, progress, counts: Counter,
+              tracker: Dict[Digest.DerivedString, int], no_user_limit: bool,
               random_state: np.random.RandomState) -> Tuple[str,
                                                             Optional[int],
                                                             str,
@@ -265,6 +266,8 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
     :param prob_accept: probability threshold used to subsample the full read-set
     :param progress: progress bar for user feedback
     :param counts: a tracker class for various rejection conditions
+    :param tracker: a tracker for junction kmer types
+    :param no_user_limit: a user limit has not been set
     :param random_state: random state for subsampling
     :return: yield tuple of (sequence, site position, read id, seq length, junc length, junc seq)
     """
@@ -274,7 +277,9 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
     for _id, _seq, _qual in reader:
 
         counts['all'] += 1
-        progress.update()
+        if no_user_limit:
+            # no limit has been set, track all progress
+            progress.update()
 
         # subsampling read-set
         if prob_accept is not None and prob_accept < unif():
@@ -300,6 +305,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
             _ix, _end = _match.span()
             _junc_len = _end - _ix
             _junc_seq = _match.group()
+            tracker[_junc_seq] += 1
             # only report sites which meet flank constraints
             # elif k_size <= _ix <= (seq_len - (k_size + site_size)):
             if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
@@ -398,9 +404,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         raise UnknownLibraryKitException(library_kit)
 
     assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
-    enzymes = [get_enzyme_instance(_en) for _en in enzyme_names]
-
-    digest = Digest(*enzymes, no_ambig=False)
+    digest = Digest(*enzyme_names, no_ambig=False)
     longest_site = digest.longest_junction()
 
     k_size = get_kmer_size(kmer_db)
@@ -416,8 +420,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         assert k_size > li.junc_len, 'k-mer size must be larger than any junction size'
         # assert (k_size - li.junc_len) % 2 == 0, 'k-mer size and junction sizes should match (even/even) or (odd/odd)'
 
-        logger.info('The enzymatic combination {} produces the {}nt ligation junction {}'
-                    .format(li.signature, li.junc_len, li.junction))
+        logger.info('The enzymatic combination {}/{} produces the {}nt ligation junction {}'
+                    .format(li.enz5p, li.enz3p, li.junc_len, li.junction))
         logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'
                     .format(li.junc_len + 2 * k_size + 2))
 
@@ -449,6 +453,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
     # count the available reads if not max_obs not set
     if max_obs is not None:
+        user_limited = True
         logger.info('Sampling a maximum of {} observations'.format(max_obs))
         sampled_obs = np.linspace(0, max_obs, len(read_files) + 1, dtype=np.int)
         if len(read_files) > 1:
@@ -456,6 +461,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         # prepare the progress bar
         progress = tqdm.tqdm(total=max_obs)
     else:
+        user_limited = False
         sampled_obs = None
         n_reads = 0
         for reads in read_files:
@@ -471,6 +477,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     obs_fragments = defaultdict(int)
 
     any_site_match = digest.cutsite_searcher('startswith')
+    junction_tracker = digest.tracker('junction')
 
     try:
 
@@ -480,7 +487,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
             # set up the generator over FastQ reads, with sub-sampling
             fq_reader = next_read(reads, digest.junction_searcher('find'), longest_site, k_size,
-                                  sample_rate, progress, analysis_counter, random_state)
+                                  sample_rate, progress, analysis_counter, junction_tracker,
+                                  not user_limited, random_state)
 
             while True:
 
@@ -538,6 +546,11 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                     analysis_counter.counts['high_cov'] += 1
                     continue
 
+                if user_limited:
+                    # user limited runs get progress updates here rather than
+                    # within the read iterator
+                    progress.update()
+
                 cumulative_length += seq_len
 
                 obs_fragments[_id] += 1
@@ -545,10 +558,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 # record this observation
                 coverage_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id, seq_len, junc_seq))
 
-                if max_obs is not None and analysis_counter.analysed() >= sampled_obs[n]:
+                if max_obs is not None and analysis_counter.accepted() >= sampled_obs[n]:
                     break
 
-            if max_obs is not None and analysis_counter.analysed() >= max_obs:
+            if max_obs is not None and analysis_counter.accepted() >= max_obs:
                 raise MaxObsLimit
 
     except MaxObsLimit:
@@ -675,42 +688,48 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         # estimate CI using resampling
         _sample_est = []
-        _sample_unobs = []
+        _sample_obs = []
         for i in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
             _smpl = assign_empirical_pvalues_all(
                 all_df.sample(frac=0.8, replace=False, random_state=random_state)
                       .drop_duplicates('seq'))
             _sample_est.append(pvalue_expectation(_smpl))
             _obs_extent = _smpl.read_len.sum()
-            _sample_unobs.append(1 - simple_observed_fraction(_obs_extent, mean_insert, n_frag_obs))
+            _n_frags = len(set(_smpl.seq))
+            _total_extent = mean_insert * _n_frags
+            _sample_obs.append(_obs_extent / _total_extent)
         _sample_est = pandas.DataFrame(_sample_est)
+
         # Use the 95% quantiles from the bootstrap samples
         hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
-        unobs_frac = np.quantile(_sample_unobs, q=[0.025, 0.975])
+        obs_frac = np.quantile(_sample_obs, q=[0.025, 0.975])
 
         report['raw_fraction'] = hic_frac
         logger.info('Estimated raw Hi-C read fraction via p-value sum method: 95% CI [{:#.4g},{:#.4g}]'
                     .format(*hic_frac * 100))
-
-        if np.any(unobs_frac < 0):
-            unobs_frac = 0
+        if np.any((1 - obs_frac) < 0):
+            obs_frac = 1
             logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
                            'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, unobs_frac))
+                           .format(mean_insert, 1 - obs_frac))
         else:
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: '
                         '95% CI [{:#.4g},{:#.4g}]'
-                        .format(mean_insert, *unobs_frac))
+                        .format(mean_insert, * 1 - obs_frac))
 
-            report['adj_fraction'] = hic_frac * 1/(1 - unobs_frac)
+            report['adj_fraction'] = hic_frac * 1/obs_frac
             if np.any(report['adj_fraction'] > 1):
                 logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
                 report['adj_fraction'] = None
             else:
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
-                            .format(*(hic_frac * 1/(1 - unobs_frac)) * 100))
+                            .format(*(hic_frac * 1/obs_frac) * 100))
 
-        report['unobs_frac'] = unobs_frac
+        report['unobs_frac'] = 1 - obs_frac
+
+        for _e, _counts in digest.gather_tracker(junction_tracker).items():
+            for _j, _n in _counts.items():
+                logger.info(f'For {_e} junction sequence {_j} found: {_n}')
 
         # combine them together
         if output_table is not None:

@@ -17,7 +17,7 @@ from Bio.Restriction import Restriction
 from collections.abc import MutableMapping
 from leven import levenshtein
 from numba import jit
-from typing import Dict, List, Optional, Tuple, TypeVar
+from typing import Dict, List, Optional, Tuple, TypeVar, Union
 
 from .exceptions import *
 from .utils import open_input, modification_hash, count_sequences
@@ -37,7 +37,8 @@ enzyme_info = collections.namedtuple('enzyme_info',
 
 # Information pertaining to a Hi-C ligation junction
 ligation_info = collections.namedtuple('ligation_info',
-                                       ('signature', 'junction', 'vestigial', 'junc_len', 'vest_len', 'pattern'))
+                                       ('enz5p', 'enz3p', 'junction', 'vestigial', 'junc_len',
+                                        'vest_len', 'pattern', 'cross'))
 
 # Information pertaining to digestion / private class for readability
 digest_info = collections.namedtuple('digest_info', ('enzyme', 'end5', 'end3', 'overhang'))
@@ -48,7 +49,7 @@ class Digest(object):
     A Hi-C digestion. This can support one or two enzyme digestions and ambiguous nucleotides within
     the cut-site such as used by Arima.
     """
-    def __init__(self, enzyme_a: EnzymeType, enzyme_b: EnzymeType = None, no_ambig: bool = True):
+    def __init__(self, enzyme_a: str, enzyme_b: str = None, no_ambig: bool = True):
 
         def vestigial_site(enz: EnzymeType, junc: str) -> str:
             """
@@ -97,11 +98,15 @@ class Digest(object):
                 _junc_seq = f'{a.end5}{a.overhang}{b.overhang}{b.end3}'
                 if _junc_seq not in _junctions:
                     _vest_seq = vestigial_site(a.enzyme, _junc_seq)
-                    _junctions[_junc_seq] = ligation_info(f'{a.enzyme}/{b.enzyme}',
+                    _junctions[_junc_seq] = ligation_info(str(a.enzyme), str(b.enzyme),
                                                           _junc_seq, _vest_seq,
                                                           len(_junc_seq), len(_vest_seq),
-                                                          re.compile(_junc_seq.replace('N', '.')))
+                                                          re.compile(_junc_seq.replace('N', '.')),
+                                                          str(a.enzyme) == str(b.enzyme))
             return _junctions
+
+        # convert the str values to instantiated enzyme objects
+        enzyme_a, enzyme_b = get_enzymes(enzyme_a, enzyme_b)
 
         # test digestion
         assert not enzyme_a.is_blunt(), 'blunt-ended enzymes are not supported'
@@ -139,35 +144,86 @@ class Digest(object):
             sorted(set([v.vestigial for v in self.junctions.values()]), key=lambda x: (-len(x), x))).replace('N', '.')))
         self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
 
-    def unique_vestigial(self):
-        return set([ji.vestigial for ji in self.junctions.values()])
+    def unique_vestigial(self) -> List['Digest.DerivedString']:
+        uniq_vest = set([(ji.vestigial, ji.enz5p) for ji in self.junctions.values()])
+        return [Digest.DerivedString(_s, _e) for _s, _e in uniq_vest]
 
-    def longest_junction(self):
+    def longest_junction(self) -> int:
         return max(li.junc_len for li in self.junctions.values())
 
-    def unambiguous_junctions(self):
-        junc_list = []
-        for ji in self.junctions:
-            junc_list.extend(Digest._expand_ambiguous(ji))
-        return junc_list
+    def unambiguous_junctions(self) -> List['Digest.DerivedString']:
+        juncs = []
+        for ji in self.junctions.values():
+            juncs.append(Digest.DerivedString(ji.junction, '{}/{}'.format(ji.enz5p, ji.enz3p)))
+        return Digest._expand_ambiguous(*juncs)
 
-    def unambiguous_vestigial(self):
-        vest_list = []
-        for vi in self.unique_vestigial():
-            vest_list.extend(Digest._expand_ambiguous(vi))
-        return vest_list
+    def unambiguous_vestigial(self) -> List['Digest.DerivedString']:
+        return Digest._expand_ambiguous(*self.unique_vestigial())
+
+    def tracker(self, kmer_type: str) -> Dict['Digest.DerivedString', int]:
+        """
+        A dictionary object ready for tracking the number of observations for
+        the possible k-mers produced through the specified Hi-C digestion.
+        :param kmer_type: either "junction" or "vestigial" k-mers
+        :return:
+        """
+        if kmer_type == 'junction':
+            return collections.OrderedDict({ji: 0 for ji in self.unambiguous_junctions()})
+        elif kmer_type == 'vestigial':
+            return collections.OrderedDict({vi: 0 for vi in self.unambiguous_vestigial()})
+        else:
+            raise ValueError(f'unsupported kmer_type {kmer_type}')
 
     @staticmethod
-    def _expand_ambiguous(s: str) -> List[str]:
+    def gather_tracker(tracker: Dict['Digest.DerivedString', int]) -> Dict[str, Dict[str, int]]:
+        """
+        Gather tracker results by enzyme participants
+        :param tracker: a tracker dictionary produced from Digest.tracker method
+        :return: a dict of dicts containing counts per k-mer organised by enzyme
+        """
+        d = collections.defaultdict(dict)
+        for _s, _n in tracker.items():
+            d[_s.source][str(_s)] = _n
+        return d
+
+    class DerivedString(str):
+        """
+        A subclass of str which retains a record of its source.
+        """
+        def __new__(cls, _str: str, _source: str = None):
+            """
+            :param _str: the string value
+            :param _source: the source str from which this string is derived
+            """
+            obj = str.__new__(cls, _str)
+            obj.source = _source
+            return obj
+
+        def to_unambiguous(self) -> List['Digest.DerivedString']:
+            """
+            Generate the list of unambiguous strings from this instance
+            :return: a list of derived strings
+            """
+            _str = str(self)
+            _src = _str if self.source is None else self.source
+
+            n_count = _str.count('N')
+            if n_count == 0:
+                enum_seq = [Digest.DerivedString(_str, _src)]
+            else:
+                enum_seq = [_str]
+                for i in range(_str.count('N')):
+                    enum_seq = [Digest.DerivedString(_s.replace('N', _c, 1), _src) for _c in 'ACGT' for _s in enum_seq]
+            return enum_seq
+
+    @staticmethod
+    def _expand_ambiguous(*seqs: 'Digest.DerivedString') -> List['Digest.DerivedString']:
         """
         Enumerate all sequences when ambiguous bases (N only) are encountered.
-        :param s: a string representing DNA
-        :return: a list of explicit sequences
+        :param s: a DerivedString representing DNA, possibly with ambiguous N
+        :return: a list of DerivedString representing enumerated unambiguous sequences
         """
-        enum_seq = [s]
-        for i in range(s.count('N')):
-            enum_seq = [si.upper().replace('N', c, 1) for c in 'ACGT' for si in enum_seq]
-        return enum_seq
+        return [_ds for _s in seqs for _ds in _s.to_unambiguous()]
 
     def cutsite_searcher(self, method):
         if method == 'startswith':
@@ -270,41 +326,11 @@ def _fast_pair_info(r1_fwd: int, r1_start: int, r1_end: int,
 
 class CutSitesDB(MutableMapping):
 
-    def build_db(self):
-
-        with contextlib.closing(Bio.SeqIO.parse(open_input(self.fasta_file), 'fasta')) as seq_iter:
-
-            logger.info('Building cut-site database against reference sequence and {}'.format(
-                ', '.join([str(_enz) for _enz in self.enzymes])))
-
-            if self.use_tqdm:
-                total_seq = count_sequences(self.fasta_file, 'fasta', 4)
-                seq_iter = tqdm.tqdm(seq_iter, total=total_seq)
-
-            cutsite_db = {}
-            for seq in seq_iter:
-                cutsite_db[seq.id] = CutSites(seq, self.enzymes)
-            self.data = cutsite_db
-            self.file_hash = modification_hash(self.fasta_file)
-
-    def load_cache(self):
-        with gzip.open(self._cache_file(), 'rb') as cache_h:
-            logger.info('Loading cached cut-site database')
-            return pickle.load(cache_h)
-
-    def save_cache(self):
-        with gzip.open(self._cache_file(), 'wb') as cache_h:
-            logger.info('Saving cut-site database for reuse')
-            pickle.dump(self, cache_h, pickle.HIGHEST_PROTOCOL)
-
-    def _cache_file(self):
-        return '{}_sites_{}'.format(self.fasta_file, '-'.join(str(_en) for _en in self.enzymes).lower())
-
-    def __init__(self, fasta_file: str, enzymes: List[EnzymeType], use_cache: bool = False, use_tqdm: bool = False):
+    def __init__(self, fasta_file: str, enzyme_names: List[str], use_cache: bool = False, use_tqdm: bool = False):
 
         self.fasta_file = fasta_file
         # alphabetic order regardless of input order
-        self.enzymes = sorted(enzymes, key=lambda x: str(x))
+        self.enzyme_names = sorted(enzyme_names)
         self.use_cache = use_cache
         self.use_tqdm = use_tqdm
         self.data = None
@@ -323,17 +349,50 @@ class CutSitesDB(MutableMapping):
                     self.save_cache()
             else:
                 logger.info('No cut-site database cache found for digest involving {}'.format(
-                    ', '.join([str(_enz) for _enz in enzymes])))
+                    ', '.join(self.enzyme_names)))
                 self.build_db()
                 self.save_cache()
         else:
             self.build_db()
 
+    def build_db(self):
+
+        with contextlib.closing(Bio.SeqIO.parse(open_input(self.fasta_file), 'fasta')) as seq_iter:
+
+            logger.info('Building cut-site database against reference sequence and {}'.format(
+                ', '.join(self.enzyme_names)))
+
+            if self.use_tqdm:
+                total_seq = count_sequences(self.fasta_file, 'fasta', 4)
+                seq_iter = tqdm.tqdm(seq_iter, total=total_seq)
+
+            enzymes = get_enzymes(*self.enzyme_names)
+
+            cutsite_db = {}
+            for seq in seq_iter:
+                cutsite_db[seq.id] = CutSites(seq, enzymes)
+
+            self.data = cutsite_db
+            self.file_hash = modification_hash(self.fasta_file)
+
+    def load_cache(self):
+        with gzip.open(self._cache_file(), 'rb') as cache_h:
+            logger.info('Loading cached cut-site database')
+            return pickle.load(cache_h)
+
+    def save_cache(self):
+        with gzip.open(self._cache_file(), 'wb') as cache_h:
+            logger.info('Saving cut-site database for reuse')
+            pickle.dump(self, cache_h, pickle.HIGHEST_PROTOCOL)
+
+    def _cache_file(self):
+        return '{}_sites_{}'.format(self.fasta_file, '-'.join(str(_en) for _en in self.enzyme_names).lower())
+
     def __getitem__(self, item):
         return self.data[item]
 
     def __setitem__(self, key, value):
-        self.data[key] = CutSites(value, self.enzymes)
+        self.data[key] = CutSites(value, get_enzymes(*self.enzyme_names))
 
     def __delitem__(self, key):
         del self.data[key]
@@ -419,41 +478,52 @@ def leven_ratio(a: str, b: str) -> float:
     return (lsum - d) / lsum
 
 
-def get_enzyme_instance(enz_name: str) -> Restriction.RestrictionType:
+def get_enzymes(*enzyme_names: str) -> Union[EnzymeType, List[EnzymeType]]:
     """
-    Fetch an instance of a given restriction enzyme by its name.
+    Return multiple instances of Bio.Restriction enzyme classes from
+    the string name.
 
-    :param enz_name: the case-sensitive name of the enzyme
-    :return: RestrictionType the enzyme instance
+    :param enzyme_names: one or more enzyme names
+    :return: a list of instantiated objects
     """
-    # try an exact match
-    try:
-        return getattr(Restriction, enz_name)
 
-    # otherwise, supply a helpful error message
-    except AttributeError:
-        # check that the name uses only valid characters
-        if re.search(r'[^0-9A-Za-z]', enz_name) is not None:
-            raise InvalidEnzymeException(enz_name)
+    def get_enzyme_instance(enz_name: str) -> EnzymeType:
+        """
+        Fetch an instance of a given restriction enzyme by its name.
 
-        # now look for similar enzyme names to suggest
-        lower_ename = enz_name.lower()
-        similar = []
-        for a in dir(Restriction):
-            if a[0].isupper() and a[-1].isupper():
-                similar.append((a, leven_ratio(lower_ename, a.lower())))
+        :param enz_name: the case-sensitive name of the enzyme
+        :return: RestrictionType the enzyme instance
+        """
+        # try an exact match
+        try:
+            return getattr(Restriction, enz_name)
 
-        similar = np.array(similar, dtype=np.dtype([('name', 'S20'), ('score', np.float)]))
-        top = similar[np.argsort(similar['score'])[-3:]][::-1]
+        # otherwise, supply a helpful error message
+        except AttributeError:
+            # check that the name uses only valid characters
+            if re.search(r'[^0-9A-Za-z]', enz_name) is not None:
+                raise InvalidEnzymeException(enz_name)
 
-        ix = top['score'] > 0.9
-        # if there are near-perfect matches, only report those
-        if ix.sum() > 0:
-            top = top['name'][ix]
-        # otherwise, try and suggest a few maybes
-        else:
-            top = top['name'][top['score'] > 0.7]
-        raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
+            # now look for similar enzyme names to suggest
+            lower_ename = enz_name.lower()
+            similar = []
+            for a in dir(Restriction):
+                if a[0].isupper() and a[-1].isupper():
+                    similar.append((a, leven_ratio(lower_ename, a.lower())))
+
+            similar = np.array(similar, dtype=np.dtype([('name', 'S20'), ('score', np.float)]))
+            top = similar[np.argsort(similar['score'])[-3:]][::-1]
+
+            ix = top['score'] > 0.9
+            # if there are near-perfect matches, only report those
+            if ix.sum() > 0:
+                top = top['name'][ix]
+            # otherwise, try and suggest a few maybes
+            else:
+                top = top['name'][top['score'] > 0.7]
+            raise UnknownEnzymeException(enz_name, [s.decode('UTF-8') for s in top])
+
+    return [_en if _en is None else get_enzyme_instance(_en) for _en in enzyme_names]
 
 
 def restriction_enzyme_by_site(size: int = None) -> dict:

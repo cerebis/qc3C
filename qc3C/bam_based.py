@@ -10,7 +10,7 @@ from collections import OrderedDict
 from typing import Optional, Tuple, List
 from abc import ABC, abstractmethod
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
-from qc3C.ligation import get_enzyme_instance, CutSitesDB, Digest
+from qc3C.ligation import CutSitesDB, Digest
 from qc3C.utils import init_random_state, write_jsonline, simple_observed_fraction
 from qc3C._version import runtime_info
 
@@ -385,7 +385,6 @@ class read_pairs(object):
 
         self.random_state = random_state
         self.show_progress = show_progress
-        self.progress = None
         self.is_ipynb = is_ipynb
         self.reference_lengths = np.array([li for li in self.bam.lengths])
 
@@ -501,11 +500,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         raise UnknownLibraryKitException(library_kit)
 
     assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
-    enzymes = [get_enzyme_instance(_en) for _en in enzyme_names]
-
-    digest = Digest(*enzymes, no_ambig=False)
-
-    cutsite_db = CutSitesDB(fasta_file, enzymes, use_cache=True, use_tqdm=True)
+    digest = Digest(*enzyme_names, no_ambig=False)
+    cutsite_db = CutSitesDB(fasta_file, enzyme_names, use_cache=True, use_tqdm=True)
 
     # for efficiency, disable sampling if rate is 1
     if sample_rate == 1 or sample_rate is None:
@@ -516,14 +512,13 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
 
     random_state = init_random_state(seed)
 
-    if max_obs is not None:
-        show_progress = count_reads = False
-    else:
-        show_progress = count_reads = True
-
     mp_progress = None
     if max_obs is not None:
+        show_progress = count_reads = False
+        # special progress bar for max-obs runs
         mp_progress = tqdm.tqdm(total=max_obs, desc='Pairs')
+    else:
+        show_progress = count_reads = True
 
     cumulative_length = 0
     short_sum = 0
@@ -552,8 +547,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     startswith_junction = digest.junction_searcher('startswith')
     endswith_vestigial = digest.vestigial_searcher('endswith')
 
-    junction_tracker = OrderedDict({ji: 0 for ji in digest.unambiguous_junctions()})
-    vestigial_tracker = OrderedDict({vi: 0 for vi in digest.unambiguous_vestigial()})
+    junction_tracker = digest.tracker('junction')
+    vestigial_tracker = digest.tracker('vestigial')
 
     # all_pairs = []
     try:
@@ -906,8 +901,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     for ci in digest.cutsites.values():
         logger.info('The enzyme {} has cut-site {}'.format(ci.name, ci.site))
     for ji in digest.junctions.values():
-        logger.info('The enzymatic combination {} produces the {}nt ligation junction {}'
-                    .format(ji.signature, ji.junc_len, ji.junction))
+        logger.info('The enzymatic combination {}/{} produces the {}nt ligation junction {}'
+                    .format(ji.enz5p, ji.enz3p, ji.junc_len, ji.junction))
 
     logger.info('The number of paired reads which began with complete cut-site: {:,} ({:#.4g}%)'
                 .format(digest_counts['cs_start'],
@@ -944,10 +939,12 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                                       'vs_all_cis': vs_all_cis.tolist(),
                                       'vs_accepted': vs_accepted.tolist()}
 
-    for j, n in junction_tracker.items():
-        logger.info(f'For junction sequence {j} found: {n}')
-    for v, n in vestigial_tracker.items():
-        logger.info(f'For cutsite remnant {v} found: {n}')
+    for _e, _counts in digest.gather_tracker(junction_tracker).items():
+        for _j, _n in _counts.items():
+            logger.info(f'For {_e} junction sequence {_j} found: {_n}')
+    for _e, _counts in digest.gather_tracker(vestigial_tracker).items():
+        for _v, _n in _counts.items():
+            logger.info(f'For {_e} cutsite remnant {_v} found: {_n}')
 
     # append report to file
     if report_path is not None:
