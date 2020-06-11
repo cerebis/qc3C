@@ -1,14 +1,16 @@
 import bz2
 import gzip
-import json
 import logging
 import numpy as np
 import os
+import simplejson as json
 import subprocess
 
 from hashlib import sha256
+from json2html import json2html
 from scipy.stats import beta
-from typing import Optional, TextIO
+from typing import Optional, TextIO, Dict
+from typing.re import Pattern as tPattern
 from mimetypes import guess_type
 from .exceptions import ApplicationException
 
@@ -247,20 +249,67 @@ def init_random_state(seed: int = None) -> np.random.RandomState:
     return np.random.RandomState(seed)
 
 
-def write_jsonline(fpath: str, obj):
+def to_json_string(obj) -> str:
     """
-    Append an object to a JSON Lines format file. (newline delimited json)
+    Convert an object to a JSON string
+    :param obj: the object to convert
+    :return: a JSON format string
+    """
+    def qc3c_default(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return [qc3c_default(oi) for oi in obj]
+        elif isinstance(obj, tPattern):
+            return obj.pattern
+        raise TypeError(repr(obj) + " is not JSON serializable")
+
+    return json.dumps(obj, default=qc3c_default)
+
+
+def write_jsonline(fpath: str, obj, suffix='jsonl', append=True):
+    """
+    Append an object to a JSON Lines format file. (newline delimited json). The suffix "jsonl" will be
+    appended if not included
     :param fpath: the file path to open for writing
     :param obj: the object to write
+    :param suffix: file name suffix
+    :param append: True append to existing files, False overwrite
     """
-    def default(o):
-        if isinstance(o, np.int64):
-            return int(o)
-        elif isinstance(o, np.float64):
-            return float(o)
-        elif isinstance(o, np.ndarray):
-            return [default(oi) for oi in o]
-        raise TypeError(o.__class__)
+    if not fpath.endswith(suffix):
+        fpath = f'{fpath}.{suffix}'
+    _mode = 'at+' if append else 'at'
+    with open(fpath, _mode) as fp:
+        print(to_json_string(obj), file=fp)
 
-    with open(fpath, 'at+') as fp:
-        print(json.dumps(obj, default=default), file=fp)
+
+def write_html_report(fpath: str, report: Dict):
+    """
+    Write with truncation an HTML format version of the qc3C report. The suffix "html" will be appended
+    if not included.
+    :param fpath: the file path to open for writing
+    :param report: a qc3C report dictionary
+    """
+    if not fpath.endswith(".html"):
+        fpath = f'{fpath}.html'
+    with open(fpath, 'wt') as fp:
+        fp.write("""
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+<html lang="en">
+<head>
+        <title>qc3C report</title>
+        <style>
+            table {border: 1px solid black; border-collapse: collapse;}
+            td {padding: 5px; border: 1px solid black;}
+            th {padding: 5px; border: 1px solid black; background-color: lightblue;}
+            ul {list-style-type: none; padding: 0; margin: 0;}
+            li {padding: 0 0 5px 0;}
+        </style>
+    </head>
+    <body>
+""")
+        _html_table = json2html.convert(to_json_string(report), table_attributes='', escape=True)
+        fp.write('        {}\n'.format(_html_table))
+        fp.write("    </body>\n</html>")
