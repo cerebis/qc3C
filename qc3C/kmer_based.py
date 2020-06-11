@@ -10,7 +10,7 @@ from collections import namedtuple, defaultdict
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
 from qc3C.ligation import Digest
-from qc3C.utils import init_random_state, write_jsonline, count_sequences, simple_observed_fraction
+from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report
 from qc3C._version import runtime_info
 
 try:
@@ -316,8 +316,8 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
 
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
-            output_table: str = None, report_path: str = None, library_kit: str = 'generic',
-            num_bootstraps: int = 50) -> None:
+            output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
+            library_kit: str = 'generic', num_bootstraps: int = 50) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
@@ -333,6 +333,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     :param max_obs: the maximum number of reads to inspect
     :param output_table: if not None, write the full pandas table to the specified path
     :param report_path: append a report in single-line JSON format to the given path.
+    :param no_json: disable json report
+    :param no_html: disable html report
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
     :param num_bootstraps: the number of bootstrap samples to use
     """
@@ -584,7 +586,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         'mode': 'kmer',
         'runtime_info': runtime_info(),
         'input_args': {'kmer_db': kmer_db,
+                       'kmer_size': k_size,
                        'read_list': read_files,
+                       'enzymes': enzyme_names,
                        'seed': seed,
                        'sample_rate': sample_rate,
                        'max_coverage': max_coverage,
@@ -688,21 +692,25 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         # estimate CI using resampling
         _sample_est = []
-        _sample_obs = []
         for i in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
             _smpl = assign_empirical_pvalues_all(
                 all_df.sample(frac=0.8, replace=False, random_state=random_state)
                       .drop_duplicates('seq'))
-            _sample_est.append(pvalue_expectation(_smpl))
+            # keep track of the raw p-value for each sample
+            _stats = pvalue_expectation(_smpl)
+            # the total extent of reads in sample
             _obs_extent = _smpl.read_len.sum()
+            # the number of fragments is assumed to be the unique number of reads
             _n_frags = len(set(_smpl.seq))
-            _total_extent = mean_insert * _n_frags
-            _sample_obs.append(_obs_extent / _total_extent)
-        _sample_est = pandas.DataFrame(_sample_est)
+            # also keep track of the fraction of extent observed for each sample
+            _stats['obs_frac'] = _obs_extent / (mean_insert * _n_frags)
+            _sample_est.append(_stats)
 
+        # we're lazy, lets do the data manipulations with pandas
+        _sample_est = pandas.DataFrame(_sample_est)
         # Use the 95% quantiles from the bootstrap samples
         hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
-        obs_frac = np.quantile(_sample_obs, q=[0.025, 0.975])
+        obs_frac = _sample_est['obs_frac'].quantile(q=[0.025, 0.975]).values
 
         report['raw_fraction'] = hic_frac
         logger.info('Estimated raw Hi-C read fraction via p-value sum method: 95% CI [{:#.4g},{:#.4g}]'
@@ -725,11 +733,16 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
                             .format(*(hic_frac * 1/obs_frac) * 100))
 
-        report['unobs_frac'] = 1 - obs_frac
+        report['unobs_fraction'] = 1 - obs_frac
 
+        report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
+                               'junctions': digest.to_dict('junction')}
+
+        report['junction_frequency'] = {}
         for _e, _counts in digest.gather_tracker(junction_tracker).items():
             for _j, _n in _counts.items():
                 logger.info(f'For {_e} junction sequence {_j} found: {_n}')
+                report['junction_frequency'][f'{_e} {_j}'] = _n
 
         # combine them together
         if output_table is not None:
@@ -739,6 +752,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 all_df.to_csv(out_h, sep='\t')
 
     finally:
-        # append report to file
-        if report_path is not None:
-            write_jsonline(report_path, report)
+
+        if not no_json:
+            write_jsonline(report_path, report, suffix='json', append=False)
+
+        if not no_html:
+            write_html_report(report_path, report)

@@ -7,11 +7,12 @@ import subprocess
 import tqdm
 
 from collections import OrderedDict
-from typing import Optional, Tuple, List
 from abc import ABC, abstractmethod
+from astropy.stats import sigma_clipped_stats
+from typing import Optional, Tuple, List
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
 from qc3C.ligation import CutSitesDB, Digest
-from qc3C.utils import init_random_state, write_jsonline, simple_observed_fraction
+from qc3C.utils import init_random_state, write_jsonline, simple_observed_fraction, write_html_report
 from qc3C._version import runtime_info
 
 logger = logging.getLogger(__name__)
@@ -468,7 +469,8 @@ class read_pairs(object):
 
 def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
             seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_obs: int = None,
-            threads: int = 1, report_path: str = None, library_kit: str = 'generic') -> None:
+            threads: int = 1, report_path: str = None, no_json: bool = False, no_html: bool = False,
+            library_kit: str = 'generic') -> None:
     """
     analyse a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
     This method attempts to assess details which indicate the overall strength of the
@@ -484,6 +486,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     :param max_obs: the maximum number of accepted pairs to inspect
     :param threads: the number of threads used in accessing the bam file
     :param report_path: append a report in single-line JSON format to the given path.
+    :param no_json: disable json report
+    :param no_html: disable html report
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
     """
 
@@ -512,6 +516,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
 
     random_state = init_random_state(seed)
 
+    logger.info('Beginning analysis...')
+
     mp_progress = None
     if max_obs is not None:
         show_progress = count_reads = False
@@ -521,10 +527,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         show_progress = count_reads = True
 
     cumulative_length = 0
-    short_sum = 0
     short_count = 0
-    long_counts = np.zeros(3, dtype=np.int)
-    long_bins = (1000, 5000, 10000)
     read_counts = {'full_align': 0, 'early_term': 0, 'no_site': 0}
     class_counts = {'dangling': 0, 'self_circle': 0, 'religation': 0, 'ffrr_invalid': 0,
                     'fr_valid': 0, 'rf_valid': 0, 'ffrr_valid': 0}
@@ -532,11 +535,6 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                      'is_split': 0}
 
     n_accepted_obs = 0
-
-    # begin with a guess for insert length
-    short_median_est = 300
-
-    logger.info('Beginning analysis...')
 
     pair_parser = read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
                              min_mapq=min_mapq, min_match=1, min_reflen=500,
@@ -550,7 +548,8 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     junction_tracker = digest.tracker('junction')
     vestigial_tracker = digest.tracker('vestigial')
 
-    # all_pairs = []
+    pair_separations = []
+
     try:
 
         for r1, r2 in pair_parser:
@@ -589,32 +588,12 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                 # when separation has been determined or estimated
                 if d is not None and d > 0:
 
-                    # all_pairs.append(d)
-
                     # track the number of pairs observed for the requested separation distances
-                    if d >= long_bins[2]:
-                        long_counts[2] += 1
-                        long_counts[1] += 1
-                        long_counts[0] += 1
-                    elif d >= long_bins[1]:
-                        long_counts[1] += 1
-                        long_counts[0] += 1
-                    elif d >= long_bins[0]:
-                        long_counts[0] += 1
+                    if d > 50:
+                        pair_separations.append(d)
 
-                    # for explicitly cis-mapped
-                    elif r1.reference_id == r2.reference_id:
-
-                        # keep a count of those pairs which are within the "WGS" region
-                        if 50 < d < 1000:
-                            short_sum += d
-                            short_count += 1
-
-                            # frugal median estimator
-                            if short_median_est > d:
-                                short_median_est -= 1
-                            elif short_median_est < d:
-                                short_median_est += 1
+                    if d < 1000:
+                        short_count += 1
 
             # extract some QC statistics from the reads in both cis and trans pairs,
             for ri in [r1, r2]:
@@ -700,6 +679,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     n_pairs_accepted = pair_parser.pair_filter.count('accepted')
     n_paired_reads = 2 * n_pairs_accepted
     n_cis_pairs = pair_parser.pair_filter.count('cis')
+    pair_separations = np.array(pair_separations, dtype=np.int32)
 
     #
     # Initial values for report
@@ -718,6 +698,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         'n_parsed_reads': pair_parser.read_filter.count('all'),
         'n_analysed_reads': pair_parser.read_filter.analysed(),
         'n_accepted_reads': pair_parser.read_filter.count('accepted'),
+        'n_skipped_reads': pair_parser.read_filter.count('sample'),
         'n_unmapped': pair_parser.read_filter.count('unmapped'),
         'n_low_mapq': pair_parser.read_filter.count('mapq'),
         'n_ref_len': pair_parser.read_filter.count('ref_len'),
@@ -751,8 +732,6 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     #
     # Log the results
     #
-
-
 
     logger.info('Number of parsed reads: {:,}'
                 .format(pair_parser.read_filter.count('all')))
@@ -848,21 +827,20 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     logger.info('Number of informative pairs: {:,}  ({:#.4g}% of cis)'
                 .format(inf_pairs, inf_pairs / n_cis_pairs * 100))
 
-    # by default, we assume no fraction has gone unobserved
-    if short_count == 0:
+    lt_1kb = pair_separations < 1000
+    if lt_1kb.sum() < 20:
         emp_mean = None
-        logger.warning('Cannot estimate insert length, no short-range cis-mapping pairs [< 1000nt].')
+        emp_median = None
+        logger.warning('Insufficient data to estimate insert size due to '
+                       'a lack of short-range cis-mapping pairs [< 1000nt].')
     else:
-        emp_mean = short_sum / short_count
-        if short_count > 10 * emp_mean:
-            logger.info('Observed short-range mean and median of pair separation: {:.0f}nt {:.0f}nt'
-                        .format(emp_mean,
-                                short_median_est))
-        else:
-            logger.warning('Too few short-range pairs for reliable streaming median estimation')
-            logger.info('Observed mean of short-range pair separation: {:.0f}nt'.format(emp_mean))
+        # use a robust estimator for the mean and median.
+        emp_mean, emp_median, emp_sd = sigma_clipped_stats(pair_separations[lt_1kb], sigma=2, maxiters=100)
+        logger.info('Estimated insert size mean and median: {:.0f}nt {:.0f}nt'
+                    .format(emp_mean,
+                            emp_median))
     report['obs_insert_mean'] = emp_mean
-    report['obs_insert_median'] = short_median_est
+    report['obs_insert_median'] = emp_median
 
     # predict unobserved fraction using a uniform model of junction location
     # across the observed mean insert length
@@ -871,19 +849,19 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     report['mean_readlen'] = mean_read_len
 
     # the observed mean could not be estimated
+    unobs_frac = None
     if emp_mean is None:
-        # this will be used later as an indicator of absence
-        unobs_frac = None
+        logger.warning('Unobserved fraction not estimated as insert size was not available')
     else:
         unobs_frac = 1 - simple_observed_fraction(cumulative_length, emp_mean, n_pairs_accepted)
 
         if unobs_frac < 0:
             unobs_frac = 0
-            logger.warning('For observed insert length of {:.0f}nt, estimated unobserved fraction '
+            logger.warning('For observed insert size of {:.0f}nt, estimated unobserved fraction '
                            'is invalid (<0). Setting to zero.'
                            .format(emp_mean))
         else:
-            logger.info('For observed insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+            logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
                         .format(emp_mean,
                                 unobs_frac))
 
@@ -891,11 +869,11 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
 
     # digest statistics
     digest_stats = {'cs_start': digest_counts['cs_start'],
-                 'cs_term': digest_counts['cs_term'],
-                 'cs_full': digest_counts['cs_full'],
-                 'read_thru': digest_counts['read_thru'],
-                 'is_split':  digest_counts['is_split'],
-                 'vestigial': digest.unique_vestigial()}
+                    'cs_term': digest_counts['cs_term'],
+                    'cs_full': digest_counts['cs_full'],
+                    'read_thru': digest_counts['read_thru'],
+                    'is_split':  digest_counts['is_split'],
+                    'vestigial': digest.unique_vestigial()}
     report['digest_stats'] = digest_stats
 
     for ci in digest.cutsites.values():
@@ -922,6 +900,12 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                 .format(digest_counts['is_split'],
                         digest_counts['is_split'] / n_paired_reads * 100))
 
+    # Tally coarse bins used by convention in Hi-C field
+    long_bins = np.array([1000, 5000, 10000], dtype=np.int)
+    long_counts = np.array([(pair_separations >= long_bins[0]).sum(),
+                            (pair_separations >= long_bins[1]).sum(),
+                            (pair_separations >= long_bins[2]).sum()], dtype=np.int)
+
     # long-range bin counts, with formatting to align fields
     field_width = np.maximum(7, np.log10(np.maximum(long_bins, long_counts)).astype(int) + 1)
     logger.info('Long-range intervals: {:>{w[0]}d}nt, {:>{w[1]}d}nt, {:>{w[2]}d}nt'
@@ -935,19 +919,36 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     logger.info('Relative to accepted: {:>{w[0]},.4g}%,  {:>{w[1]},.4g}%,  {:>{w[2]},.4g}%'
                 .format(*vs_accepted, w=field_width))
 
-    report['separation_histogram'] = {'counts': long_counts.tolist(),
-                                      'vs_all_cis': vs_all_cis.tolist(),
-                                      'vs_accepted': vs_accepted.tolist()}
+    report['separation_bins'] = {'bins': long_bins,
+                                 'counts': long_counts,
+                                 'vs_all_cis': vs_all_cis,
+                                 'vs_accepted': vs_accepted}
 
+    report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
+                           'junctions': digest.to_dict('junction')}
+
+    report['junction_frequency'] = {}
     for _e, _counts in digest.gather_tracker(junction_tracker).items():
         for _j, _n in _counts.items():
             logger.info(f'For {_e} junction sequence {_j} found: {_n}')
+            report['junction_frequency'][f'{_e} {_j}'] = _n
+
+    report['remnant_frequency'] = {}
     for _e, _counts in digest.gather_tracker(vestigial_tracker).items():
         for _v, _n in _counts.items():
             logger.info(f'For {_e} cutsite remnant {_v} found: {_n}')
+            report['remnant_frequency'][f'{_e} {_v}'] = _n
 
-    # append report to file
-    if report_path is not None:
-        write_jsonline(report_path, report)
+    # write all pair separations to a file
+    # np.savetxt('pair_separations.txt', np.array(pair_separations, dtype=np.int), fmt='%d')
+    hist, edges = np.histogram(pair_separations,
+                               bins=np.logspace(np.log10(10), np.log10(1e6), 100), density=True)
+    report['separation_histogram'] = {'mid_points': 0.5*(edges[1:] + edges[:-1]), 'counts': hist}
 
-    # np.savetxt('all_pairs.txt', np.array(all_pairs, dtype=np.int), fmt='%d')
+    if not no_json:
+        write_jsonline(report_path, report, suffix='json', append=False)
+
+    if not no_html:
+        # just drop this large record prior to creating the html version
+        del report['separation_histogram']
+        write_html_report(report_path, report)
