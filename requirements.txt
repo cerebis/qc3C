@@ -1,4 +1,6 @@
+astropy
 biopython
+json2html
 leven
 numba
 numpy
@@ -6,4 +8,5 @@ pandas
 psutil
 pysam
 scipy
+simplejson
 tqdm

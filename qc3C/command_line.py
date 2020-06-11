@@ -1,5 +1,6 @@
 import os
 import logging
+import pathlib
 import qc3C.bam_based as bam
 import qc3C.kmer_based as kmer
 from qc3C.jellyfish import mk_database
@@ -9,7 +10,7 @@ from qc3C._version import version_stamp
 
 
 __log_name__ = 'qc3C.log'
-__report_name__ = 'report.jsonl'
+__report_name__ = 'report.qc3C'
 __table_name__ = 'obs_table.tsv.gz'
 
 
@@ -43,13 +44,15 @@ def main():
                                  help='Random seed used in sampling the read-set [None]')
     analysis_parser.add_argument('-M', '--max-obs', type=int, action=UniqueStore,
                                  help='Stop after collecting this many observations')
-    analysis_parser.add_argument('--write-report', default=False, action='store_true',
-                                 help='Create a result report in JSONLines format')
-    # analysis_parser.add_argument('-k', '--library-kit', choices=['phase', 'generic'], default='generic',
-    #                            help='The library kit type [generic]')
+    analysis_parser.add_argument('--no-json', default=False, action='store_true',
+                                 help='Do not write a JSON report')
+    analysis_parser.add_argument('--no-html', default=False, action='store_true',
+                                 help='Do not write an HTML report')
+    # analysis_parser.add_argument('-k', '--library-kit', choices=['phase', 'arima'], default=None,
+    #                            help='A commercial library kit [None]')
     analysis_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
                                  help='A case-sensitive NEB enzyme name (can be used multiple times)')
-    analysis_parser.add_argument('--output-path', metavar='PATH', default='.',
+    analysis_parser.add_argument('-o', '--output-path', metavar='PATH', default='.',
                                  help='Write output files to this folder [.]')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
@@ -134,7 +137,7 @@ def main():
 
     # create the output folder if it did not exist
     if not os.path.exists(args.output_path):
-        os.mkdir(args.output_path)
+        pathlib.Path(args.output_path).mkdir(parents=True, exist_ok=True)
 
     fh = logging.FileHandler(os.path.join(args.output_path, __log_name__), mode='a')
     fh.setLevel(logging.DEBUG)
@@ -155,20 +158,19 @@ def main():
                 args.sample_rate is not None and not (0 < args.sample_rate <= 1):
             parser.error('Sample rate must be within the range (0,1]')
 
+        report_path = os.path.join(args.output_path, __report_name__)
+
         # BAM based analysis
         if args.command == 'bam':
-
-            report_path = None if not args.write_report else os.path.join(args.output_path, __report_name__)
 
             bam.analyse(args.enzyme, args.bam, args.fasta,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
                         min_mapq=args.min_mapq, max_obs=args.max_obs, report_path=report_path,
-                        library_kit='generic')
+                        no_json=args.no_json, no_html=args.no_html)
 
         # Kmer based analysis
         elif args.command == 'kmer':
 
-            report_path = None if not args.write_report else os.path.join(args.output_path, __report_name__)
             table_path = None if not args.write_table else os.path.join(args.output_path, __table_name__)
 
             if len(set(args.reads)) != len(args.reads):
@@ -177,7 +179,7 @@ def main():
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
-                         max_obs=args.max_obs, library_kit='generic')
+                         no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs)
 
         elif args.command == 'mkdb':
 

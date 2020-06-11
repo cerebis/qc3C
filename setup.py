@@ -29,14 +29,17 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
 
     install_requires=[
+        'astropy',
         'biopython',
         'leven',
+        'json2html',
         'numba',
         'numpy',
         'pandas',
         'psutil',
         'pysam',
         'scipy',
+        'simplejson',
         'tqdm'
     ],
 
