@@ -2,6 +2,7 @@ import collections
 import contextlib
 import gzip
 import itertools
+import json
 import logging
 import numpy as np
 import os
@@ -18,6 +19,7 @@ from collections.abc import MutableMapping
 from leven import levenshtein
 from numba import jit
 from typing import Dict, List, Optional, Tuple, TypeVar, Union
+from typing.re import Pattern as tPattern
 
 from .exceptions import *
 from .utils import open_input, modification_hash, count_sequences
@@ -117,7 +119,7 @@ class Digest(object):
         if no_ambig:
             assert not enzyme_a.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
             if enzyme_b is not None:
-                assert not enzyme_b.is_ambiguous, 'ambiguous symbols in enzymatic site not supported'
+                assert not enzyme_b.is_ambiguous(), 'ambiguous symbols in enzymatic site not supported'
 
         # target cut-sites
         self.cutsites = {enz.site.upper(): enzyme_info(str(enz), enz.site.upper(), len(enz.site))
@@ -248,6 +250,21 @@ class Digest(object):
             return self.any_vestigial.search
         if method == 'endswith':
             return self.end_vestigial.search
+
+    def to_dict(self, object_type: str) -> Dict[str, Dict[str, str]]:
+        """
+        Convert the cutsite or junctions related to the digest instance to a
+        2D dictionary.
+
+        :param object_type: either "junction" or "cutsite"
+        :return: a 2D dict
+        """
+        if object_type == 'junction':
+            return {k: v._asdict() for k, v in self.junctions.items()}
+        elif object_type == 'cutsite':
+            return {k: v._asdict() for k, v in self.cutsites.items()}
+        else:
+            raise ValueError(f'unsupported object_type {object_type}')
 
 
 def digest_sequence(seq: SeqRecord, enzymes: List[EnzymeType], linear: bool = True) -> np.ndarray:
