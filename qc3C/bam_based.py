@@ -12,7 +12,7 @@ from astropy.stats import sigma_clipped_stats
 from typing import Optional, Tuple, List
 from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
 from qc3C.ligation import CutSitesDB, Digest
-from qc3C.utils import init_random_state, write_jsonline, simple_observed_fraction, write_html_report
+from qc3C.utils import init_random_state, write_jsonline, observed_fraction, write_html_report
 from qc3C._version import runtime_info
 
 logger = logging.getLogger(__name__)
@@ -849,23 +849,22 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     report['mean_readlen'] = mean_read_len
 
     # the observed mean could not be estimated
-    unobs_frac = None
-    if emp_mean is None:
+    if emp_median is None:
         logger.warning('Unobserved fraction not estimated as insert size was not available')
     else:
-        unobs_frac = 1 - simple_observed_fraction(cumulative_length, emp_mean, n_pairs_accepted)
+        unobs_frac = 1 - observed_fraction(int(mean_read_len), int(emp_median),
+                                           junc_size=digest.shortest_junction())
 
         if unobs_frac < 0:
             unobs_frac = 0
             logger.warning('For observed insert size of {:.0f}nt, estimated unobserved fraction '
                            'is invalid (<0). Setting to zero.'
-                           .format(emp_mean))
+                           .format(emp_median))
         else:
             logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(emp_mean,
-                                unobs_frac))
+                        .format(emp_median, unobs_frac * 100))
 
-        report['unobs_frac'] = unobs_frac
+        report['unobs_fraction'] = unobs_frac
 
     # digest statistics
     digest_stats = {'cs_start': digest_counts['cs_start'],
