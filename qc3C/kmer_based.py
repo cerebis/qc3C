@@ -21,7 +21,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos', 'seq', 'read_len', 'junc_seq'])
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'has_junc', 'read_pos', 'seq', 'read_len', 'junc_seq'])
 
 
 class Counter(object):
@@ -154,31 +154,31 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
 
 
 def assign_empirical_pvalues_all(_df):
-    _cols = ['ratio', 'pvalue', 'read_type', 'read_len', 'seq']
+    _cols = ['ratio', 'pvalue', 'has_junc', 'read_len', 'seq']
 
     # get the observations which did not contain a junction
     # these are our cases where the NULL hypothesis is true
-    _wgs = _df.loc[_df.read_type == 'wgs', _cols].values
-    _wgs[:, 1] = -1
+    _no_junc = _df.loc[~_df.has_junc, _cols].values
+    _no_junc[:, 1] = -1
 
     # reduce this to the set of unique ratios. The returned
     # ratios are implicitly sorted in ascending order
-    _uniq_ratios, _inv_index = np.unique(_wgs[:, 0], return_inverse=True)
+    _uniq_ratios, _inv_index = np.unique(_no_junc[:, 0], return_inverse=True)
 
     # The number of unique ratios determines the set of p-values.
     # we use linspace sampler as means of calculating p(r,N) = (r+1)/(N+1)
     _pvals = np.linspace(0, 1, num=_uniq_ratios.shape[0] + 2)[2:]
 
     # reassign these pvalues using the inverse index
-    _wgs[:, 1] = _pvals[_inv_index]
+    _no_junc[:, 1] = _pvals[_inv_index]
 
     # now extract the obs which did contain the junction,
     # we will next distribute the empirical p-values
-    _out = _df.loc[_df.read_type == 'hic', _cols].values
+    _out = _df.loc[_df.has_junc, _cols].values
     _out[:, 1] = -1
 
     # join both tables and reorder by ascending ratio
-    _out = np.vstack([_wgs, _out])
+    _out = np.vstack([_no_junc, _out])
     _out = _out[np.argsort(_out[:, 0]), ]
 
     # distribute the smallest non-zero adjacent pvalue to those which are zero
@@ -195,7 +195,7 @@ def assign_empirical_pvalues_all(_df):
 
 def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     """
-    Calculate the mean p-value and variation for Hi-C observations. WGS observations
+    Calculate the mean p-value and variation for Hi-C observations. Junctionless observations
     are assigned a p-value of 0.
     :param df: the dataframe to analyse
     :return: a tuple of p-value mean and error
@@ -203,7 +203,7 @@ def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     # number of total observations
     # n_obs = len(df)
     # Hi-C q = 1 - p-value
-    q = 1 - df.loc[df.read_type == 'hic', 'pvalue'].to_numpy(np.float)
+    q = 1 - df.loc[df.has_junc, 'pvalue'].to_numpy(np.float)
 
     # mean value and error
     n_frag_obs = len(df)
@@ -503,10 +503,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                     starts_with_cutsite += 1
 
                 # if the read contains no junction, we might still use it
-                # as an example of a shotgun read (wgs)
+                # as an example of a shotgun read (no_junc)
                 if ix is None:
 
-                    rtype = 'wgs'
+                    has_junc = False
 
                     # assume longest junction for these cases
                     junc_len = longest_site
@@ -527,10 +527,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                         analysis_counter.counts['ambig'] += 1
                         continue
 
-                # junction containing reads, categorised as hic for simplicity
+                # junction containing reads, categorised as junc for simplicity
                 else:
 
-                    rtype = 'hic'
+                    has_junc = True
 
                     # abandon this sequence if it contains an N
                     if 'N' in seq[ix - k_size: ix + k_size + junc_len]:
@@ -558,7 +558,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 obs_fragments[_id] += 1
 
                 # record this observation
-                coverage_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix, _id, seq_len, junc_seq))
+                coverage_obs.append(CovInfo(mean_inner, mean_outer, has_junc, ix, _id, seq_len, junc_seq))
 
                 if max_obs is not None and analysis_counter.accepted() >= sampled_obs[n]:
                     break
@@ -643,8 +643,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         # lets do some tabular munging, making sure that our categories are explicit
         all_df = pandas.DataFrame(coverage_obs)
-        # make read_type categorical so we will always see values for both when counting
-        all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
 
         # remove any row which had zero coverage in inner or outer region
         z_inner = all_df.mean_inner == 0
@@ -654,14 +652,15 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         logger.debug('Removed rows with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
             sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-        # check that we have some of both read types
-        count_rtype = all_df.groupby('read_type').size()
-        report['n_without_junc'] = count_rtype.wgs
-        report['n_with_junc'] = count_rtype.hic
-        logger.info('Break down of accepted reads: wgs {:,} junction {:,}'.format(count_rtype.wgs, count_rtype.hic))
-        if count_rtype.wgs == 0:
+        # inspect the tally of observations with/without junctions
+        n_with_junc, n_without_junc = all_df.groupby('has_junc').size().sort_values(ascending=True)
+        report['n_without_junc'] = n_without_junc
+        report['n_with_junc'] = n_with_junc
+        logger.info('Break down of accepted reads: without junction {:,} with junction {:,}'
+                    .format(n_without_junc, n_with_junc))
+        if n_without_junc == 0:
             raise InsufficientDataException('No reads without the junction sequence were observed.')
-        if count_rtype.hic == 0:
+        if n_with_junc == 0:
             raise InsufficientDataException('No reads containing the junction sequence were observed.')
 
         mean_read_len = cumulative_length / analysis_counter.count('accepted')
@@ -680,8 +679,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
                     .format(sum(1 / 4 ** ci.site_len for ci in digest.cutsites.values()) * 100))
         logger.info('Number of accepted reads containing potential junctions: {:,} ({:#.4g}% of accepted)'
-                    .format(count_rtype.hic,
-                            count_rtype.hic / analysis_counter.count('accepted') * 100))
+                    .format(n_with_junc,
+                            n_with_junc / analysis_counter.count('accepted') * 100))
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
                     .format(sum(1 / 4 ** li.junc_len for li in digest.junctions.values()) * 100))
 
