@@ -66,9 +66,11 @@ def mk_database(db_path, fasta_files, kmer_size, hash_size, threads=1):
 
             if return_value > 0:
                 logger.warning('Jellyfish subprocess returned non-zero value: {}'.format(return_value))
-                logger.warning('Jellyfish stderr: {}'.format(err))
+                if err:
+                    logger.warning('Jellyfish stderr: {}'.format(err.decode()))
             else:
-                logger.debug('Jellyfish stdout: {}'.format(out))
+                if out:
+                    logger.debug('Jellyfish stdout: {}'.format(out.decode()))
 
         except subprocess.CalledProcessError as e:
             logger.error('An exception occurred during kmer database creation')
