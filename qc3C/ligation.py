@@ -153,6 +153,9 @@ class Digest(object):
     def longest_junction(self) -> int:
         return max(li.junc_len for li in self.junctions.values())
 
+    def shortest_junction(self) -> int:
+        return min(li.junc_len for li in self.junctions.values())
+
     def unambiguous_junctions(self) -> List['Digest.DerivedString']:
         juncs = []
         for ji in self.junctions.values():
