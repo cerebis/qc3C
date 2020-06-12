@@ -81,6 +81,8 @@ def main():
     """
     CLI for Kmer based analysis
     """
+    cmd_kmer.add_argument('--merged-reads', default=False, action='store_true',
+                          help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
                           help='Save the collected observations to a file')
     cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float, action=UniqueStore,
@@ -176,10 +178,14 @@ def main():
             if len(set(args.reads)) != len(args.reads):
                 parser.error('Some supplied input read-sets are the same file')
 
+            if args.merged_reads:
+                logger.info('Merged reads specified, insert size will be ignored')
+
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
-                         no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs)
+                         no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs,
+                         merged_reads=args.merged_reads)
 
         elif args.command == 'mkdb':
 

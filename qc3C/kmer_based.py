@@ -7,6 +7,7 @@ import tqdm
 import logging
 
 from collections import namedtuple, defaultdict
+from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
 from qc3C.ligation import Digest
@@ -317,7 +318,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
             output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
-            library_kit: str = 'generic', num_bootstraps: int = 50) -> None:
+            library_kit: str = 'generic', num_bootstraps: int = 50, merged_reads: bool=False) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
@@ -337,6 +338,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     :param no_html: disable html report
     :param library_kit: the type of kit used in producing the library (ie. phase, generic)
     :param num_bootstraps: the number of bootstrap samples to use
+    :param merged_reads: supplied reads are merged pairs, covering whole insert
     """
 
     def collect_coverage(seq: str, ix: int, site_size: int, k: int) -> (float, float):
@@ -380,7 +382,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         sum_outer = outer.sum()
         if sum_inner == 0 or sum_outer == 0:
             raise ZeroCoverageException
-        return sum_inner / inner.shape[0], sum_outer / outer.shape[0]
+        # return sum_inner / inner.shape[0], sum_outer / outer.shape[0]
+        return gmean(inner), gmean(outer)
 
     def set_progress_description():
         """ Convenience method for setting tqdm progress bar description """
@@ -594,7 +597,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                        'max_coverage': max_coverage,
                        'mean_insert': mean_insert,
                        'max_freq_quantile': max_freq_quantile,
-                       'max_obs': max_obs},
+                       'max_obs': max_obs,
+                       'merged_reads': merged_reads},
         'n_parsed_reads': analysis_counter.counts['all'],
         'n_analysed_reads': analysis_counter.analysed(),
         'n_too_short': analysis_counter.count('short'),
@@ -687,6 +691,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         n_read_obs = sum(obs_fragments.values())
         n_frag_obs = len(obs_fragments)
         logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
+
+        if n_read_obs == n_frag_obs and not merged_reads:
+            logger.warning('The number of fragments equals the number of reads. Should "--merged-reads" have been set?')
         logger.info('Fragment observational redundancy: {:.4g}'.format(n_read_obs / n_frag_obs))
 
         # estimate CI using resampling
@@ -702,7 +709,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             # the number of fragments is assumed to be the unique number of reads
             _n_frags = len(set(_smpl.seq))
             # also keep track of the fraction of extent observed for each sample
-            _stats['obs_frac'] = _obs_extent / (mean_insert * _n_frags)
+            if merged_reads:
+                _stats['obs_frac'] = 1
+            else:
+                _stats['obs_frac'] = _obs_extent / (mean_insert * _n_frags)
             _sample_est.append(_stats)
 
         # we're lazy, lets do the data manipulations with pandas
@@ -718,13 +728,13 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             obs_frac = 1
             logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
                            'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, 1 - obs_frac))
+                           .format(mean_insert, 1 - obs_frac[::-1]))
         else:
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: '
                         '95% CI [{:#.4g},{:#.4g}]'
-                        .format(mean_insert, * 1 - obs_frac))
+                        .format(mean_insert, * 1 - obs_frac[::-1]))
 
-            report['adj_fraction'] = hic_frac * 1/obs_frac
+            report['adj_fraction'] = hic_frac * 1 / obs_frac
             if np.any(report['adj_fraction'] > 1):
                 logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
                 report['adj_fraction'] = None
@@ -732,7 +742,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
                             .format(*(hic_frac * 1/obs_frac) * 100))
 
-        report['unobs_fraction'] = 1 - obs_frac
+        report['unobs_fraction'] = 1 - obs_frac[::-1]
 
         report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
                                'junctions': digest.to_dict('junction')}
