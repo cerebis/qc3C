@@ -34,9 +34,9 @@ def mk_database(db_path, fasta_files, kmer_size, hash_size, threads=1):
 
         try:
             logger.info('Beginning library creation')
-            logger.info('Requested kmer size: {}\n'.format(kmer_size))
-            logger.info('Input FastQ files: {}\n'.format(' '.join(fasta_files)))
-            logger.info('Creating library: {}\n'.format(db_path))
+            logger.info('Requested kmer size: {}'.format(kmer_size))
+            logger.info('Input FastQ files: {}'.format(' '.join(fasta_files)))
+            logger.info('Creating library: {}'.format(db_path))
             p = subprocess.Popen(['jellyfish', 'count',
                                   '-C',
                                   '-t', str(threads),
