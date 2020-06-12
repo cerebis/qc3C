@@ -555,35 +555,25 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         for r1, r2 in pair_parser:
 
             # cis-mapping pairs, lets categorise using the standard nomenclature
-            if r1.reference_id == r2.reference_id:
+            cis_pair = r1.reference_id == r2.reference_id
 
-                d, ns, flipped = cutsite_db[r1.reference_name].pair_info(r1, r2)
+            num_sites = 0
+
+            if cis_pair:
+
+                d, num_sites, flipped = cutsite_db[r1.reference_name].pair_info(r1, r2)
 
                 if flipped:
                     r1, r2 = r2, r1
 
                 # invalid pair
-                if ns == 0:
-
+                if num_sites == 0:
                     if not r1.is_reverse and r2.is_reverse:
                         class_counts['dangling'] += 1
                     elif r1.is_reverse and not r2.is_reverse:
                         class_counts['self_circle'] += 1
                     else:
                         class_counts['ffrr_invalid'] += 1
-
-                else:
-
-                    # proper orientation
-                    if not r1.is_reverse and r2.is_reverse:
-                        if ns == 1:
-                            class_counts['religation'] += 1
-                        else:
-                            class_counts['fr_valid'] += 1
-                    elif r1.is_reverse and not r2.is_reverse:
-                        class_counts['rf_valid'] += 1
-                    else:
-                        class_counts['ffrr_valid'] += 1
 
                 # when separation has been determined or estimated
                 if d is not None and d > 0:
@@ -657,12 +647,24 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                         junc_match = startswith_junction(seq[i:])
                         # for full matches, keep a separate tally
                         if junc_match is not None:
+                            pair_readthru = True
                             junction_tracker[junc_match.group()] += 1
                             digest_counts['read_thru'] += 1
                             if ri.has_tag('SA'):
                                 digest_counts['is_split'] += 1
+
                     if _no_site:
                         read_counts['no_site'] += 1
+
+            if cis_pair and num_sites >= 1:
+                if not r1.is_reverse and r2.is_reverse:
+                    if num_sites == 1:
+                        class_counts['religation'] += 1
+                    class_counts['fr_valid'] += 1
+                elif r1.is_reverse and not r2.is_reverse:
+                    class_counts['rf_valid'] += 1
+                else:
+                    class_counts['ffrr_valid'] += 1
 
             if max_obs is not None:
                 n_accepted_obs += 1
