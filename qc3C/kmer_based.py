@@ -318,7 +318,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
             output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
-            library_kit: str = 'generic', num_bootstraps: int = 50, merged_reads: bool=False) -> None:
+            library_kit: str = 'generic', num_bootstraps: int = 50, merged_reads: bool = False) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
@@ -378,11 +378,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
             inner[i+1] = get_kmer_cov(si)
 
-        sum_inner = inner.sum()
-        sum_outer = outer.sum()
-        if sum_inner == 0 or sum_outer == 0:
-            raise ZeroCoverageException
-        # return sum_inner / inner.shape[0], sum_outer / outer.shape[0]
+        # if (inner == 0).sum() > 0 or (outer == 0).sum() > 0:
+        #     raise ZeroCoverageException
         return gmean(inner), gmean(outer)
 
     def set_progress_description():
@@ -520,7 +517,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                     while _attempts < 3:
                         ix = randint(k_size + 1, seq_len - (k_size + longest_site))
                         # if no N within the subsequence, then accept it
-                        if 'N' not in seq[ix - k_size: ix + k_size + longest_site]:
+                        if 'N' not in seq[ix - k_size: ix + k_size + longest_site + 1]:
                             break
                         # otherwise keep trying
                         _attempts += 1
@@ -536,7 +533,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                     has_junc = True
 
                     # abandon this sequence if it contains an N
-                    if 'N' in seq[ix - k_size: ix + k_size + junc_len]:
+                    if 'N' in seq[ix - k_size: ix + k_size + junc_len + 1]:
                         analysis_counter.counts['ambig'] += 1
                         continue
 
