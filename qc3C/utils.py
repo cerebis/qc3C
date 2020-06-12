@@ -35,7 +35,8 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     """
     return obs_extent / (mean_frag_size * n_fragments)
 
-def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
+
+def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
                       junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
@@ -43,7 +44,7 @@ def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
     how much of each read can be inspected.
 
     :param read_len: the average read-length
-    :param mean_insert: the average insert (or fragment) length
+    :param insert_len: the average insert (or fragment) length
     :param kmer_size: the requested k-mer size
     :param junc_size: the junction size
     :param is_phase: whether or not the library was constructed using Phase's kit
@@ -51,27 +52,28 @@ def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
     :return: the observed fraction [0, 1]
     """
 
-    def make_observable_mask(read_len: int, mean_insert: int, kmer_size: int,
+    def make_observable_mask(read_len: int, insert_len: int, kmer_size: int,
                              junc_size: int, is_single: bool) -> np.ndarray:
         """
         Use a mask to calculate the proportion of a fragment which can be interrogated
         due to the need for a sliding window around any observed junction sequence.
 
         :param read_len: the average read-length
-        :param mean_insert: the average insert (or fragment) length
+        :param insert_len: the average insert (or fragment) length
         :param kmer_size: the requested k-mer size
         :param junc_size: the junction size
         :param is_single: the observational set has been reduced to a single read per fragment
         :return:
         """
-        frag_mask = np.zeros(mean_insert, dtype=np.bool)
+
+        frag_mask = np.zeros(insert_len, dtype=np.bool)
         read_mask = np.zeros(read_len, dtype=np.bool)
         x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
         # create a read mask that represents the region of the read which can be interrogated
         read_mask[x_min:x_max] = True
         # create a fragment mask by transferring this silhouette to either end of the fragment
         # handling the edge-case where the insert length is less than the read length
-        a = read_len if read_len < mean_insert else mean_insert
+        a = read_len if read_len < insert_len else insert_len
         frag_mask[:a] |= read_mask[:a]
         if not is_single:
             # treat both ends if paired
@@ -79,7 +81,10 @@ def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
         # return the fragment mask
         return frag_mask
 
-    obs_mask = make_observable_mask(read_len, mean_insert, kmer_size, junc_size, is_single)
+    read_len = round(read_len)
+    insert_len = round(insert_len)
+
+    obs_mask = make_observable_mask(read_len, insert_len, kmer_size, junc_size, is_single)
 
     if is_phase:
 
@@ -105,7 +110,7 @@ def observed_fraction(read_len: int, mean_insert: int, kmer_size: int = 0,
         # sum the distribution slices from each window
         obs_frac = 0
         for wi in obs_wins:
-            obs_frac += rv.cdf(wi[1] / mean_insert) - rv.cdf(wi[0] / mean_insert)
+            obs_frac += rv.cdf(wi[1] / insert_len) - rv.cdf(wi[0] / insert_len)
 
     else:
         logger.debug('Calculating the observed fraction as a generic library')
