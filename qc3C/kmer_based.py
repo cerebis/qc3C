@@ -9,7 +9,7 @@ import logging
 from collections import namedtuple, defaultdict
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
-from qc3C.exceptions import InsufficientDataException, UnknownLibraryKitException, MaxObsLimit, ZeroCoverageException
+from qc3C.exceptions import *
 from qc3C.ligation import Digest
 from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report
 from qc3C._version import runtime_info
@@ -27,8 +27,10 @@ CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'has_junc', 'read_
 
 class Counter(object):
     def __init__(self, **extended_fields):
-        self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
+        self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0,
+                       'high_cov': 0, 'low_cov': 0, 'zero_cov': 0}
         self.counts.update(extended_fields)
+        self.reject_keys = self.counts.keys() - {'all', 'sample'}
 
     def __getitem__(self, item: str):
         return self.counts[item]
@@ -59,7 +61,7 @@ class Counter(object):
         return self.analysed() - self.rejected()
 
     def rejected(self) -> int:
-        return self.counts['short'] + self.counts['flank'] + self.counts['ambig'] + self.counts['high_cov']
+        return sum(self.counts[k] for k in self.reject_keys)
 
     def count(self, category: str) -> int:
         """
@@ -377,10 +379,16 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             outer[i+4] = get_kmer_cov(si)
             si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
             inner[i+1] = get_kmer_cov(si)
+            if outer[i+1] == 0 or outer[i+4] == 0 or inner[i+1] == 0:
+                # print("OL", si, outer[i+1], seq)
+                # print("OR", si, outer[i+4], seq)
+                # print("IN", si, inner[i+1], seq)
+                raise ZeroCoverageException()
 
-        # if (inner == 0).sum() > 0 or (outer == 0).sum() > 0:
-        #     raise ZeroCoverageException
-        return gmean(inner), gmean(outer)
+        cov_inner, cov_outer = gmean(inner), gmean(outer)
+        if cov_outer < 2:
+            raise LowCoverageException()
+        return cov_inner, cov_outer
 
     def set_progress_description():
         """ Convenience method for setting tqdm progress bar description """
@@ -449,7 +457,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
     starts_with_cutsite = 0
     cumulative_length = 0
-    no_coverage = 0
 
     logger.info('Beginning analysis...')
 
@@ -540,7 +547,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 try:
                     mean_inner, mean_outer = collect_coverage(seq, ix, junc_len, k_size)
                 except ZeroCoverageException:
-                    no_coverage += 1
+                    analysis_counter.counts['zero_cov'] += 1
+                    continue
+                except LowCoverageException:
+                    analysis_counter.counts['low_cov'] += 1
                     continue
 
                 # avoid regions with pathologically high coverage
@@ -573,8 +583,11 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             progress.close()
             progress = None
 
-    if max_obs is not None and analysis_counter.count('all') >= max_obs:
-        logger.info('Reached user-defined observation limit [{}]'.format(max_obs))
+    if max_obs is not None:
+        if analysis_counter.count('accepted') >= max_obs:
+            logger.info('Reached requested observation limit [{}]'.format(max_obs))
+        else:
+            logger.warning('Failed to collect requested number of observations [{}]'.format(max_obs))
 
     if analysis_counter.fraction('rejected') > 0.9:
         logger.warning('More than 90% of reads were rejected')
@@ -602,6 +615,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         'n_no_flank': analysis_counter.count('flank'),
         'n_ambiguous': analysis_counter.count('ambig'),
         'n_high_cov': analysis_counter.count('high_cov'),
+        'n_low_cov': analysis_counter.count('low_cov'),
+        'n_zero_cov': analysis_counter.count('zero_cov'),
     }
 
     logger.info('Number of parsed reads: {:,}'
@@ -621,15 +636,17 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     logger.info('Number of reads filtered [high coverage]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('high_cov'),
                         analysis_counter.fraction('high_cov') * 100))
+    logger.info('Number of reads filtered [low coverage]: {:,} ({:#.4g}% of analysed)'
+                .format(analysis_counter.count('low_cov'),
+                        analysis_counter.fraction('low_cov') * 100))
 
     # this might not be needed generally.
-    frac_nc = no_coverage / analysis_counter.analysed()
-    logger.info('Number of reads filtered [no k-mer coverage]: {:,} ({:#.4g}% of analyzed)'
-                .format(no_coverage,
-                        frac_nc * 100))
-    if frac_nc > 0.05:
+    if analysis_counter.count('zero_cov') > 0:
         logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
-        logger.warning('* Possible mismatch between k-mer library and read-set producing unreliable results *')
+        logger.warning('There were {:,} ({:#.4g}% of analyzed) reads filtered due to no k-mer coverage.'
+                       .format(analysis_counter.count('zero_cov'),
+                               analysis_counter.fraction('zero_cov') * 100))
+        logger.warning('This suggests the k-mer library was not created from the supplied read-set.')
         logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
 
     try:

@@ -16,6 +16,13 @@ class ZeroCoverageException(ApplicationException):
             'Queried observations of K-mer coverage summed to zero')
 
 
+class LowCoverageException(ApplicationException):
+    """Queried observations of K-mer coverage where of insufficient depth"""
+    def __init__(self):
+        super(LowCoverageException, self).__init__(
+            'Queried observations of K-mer coverage were of insufficient depth')
+
+
 class UnknownLibraryKitException(ApplicationException):
     """The library kit is unknown"""
     def __init__(self, library_kit: str):
