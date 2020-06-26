@@ -282,12 +282,15 @@ class ReadFilter(Counter):
         if self.no_supplementary and r.is_supplementary:
             self._counts['supplementary'] += 1
             _accept = False
-        if self.min_match is not None:
+
+        # only test for the following conditions if the read alignment has passed earlier tests
+
+        if _accept and self.min_match is not None:
             cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
             if cig[0] != 0 or cig[1] < self.min_match:
                 self._counts['weak'] += 1
                 _accept = False
-        if self.no_refterm and r.query_alignment_length < r.query_length and \
+        if _accept and self.no_refterm and r.query_alignment_length < r.query_length and \
                 (r.reference_end >= self.ref_lengths[r.reference_id] or r.reference_start == 0):
             self._counts['ref_term'] += 1
             _accept = False
@@ -460,8 +463,10 @@ class read_pairs(object):
                     if test_pair(read_a, read_b):
                         yield read_a, read_b
 
-                read_a = read_b
-                pass_a = pass_b
+                # only remember the previous accepted alignment
+                if pass_b:
+                    read_a = read_b
+                    pass_a = pass_b
 
         except StopIteration:
             self.close()
@@ -647,7 +652,6 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                         junc_match = startswith_junction(seq[i:])
                         # for full matches, keep a separate tally
                         if junc_match is not None:
-                            pair_readthru = True
                             junction_tracker[junc_match.group()] += 1
                             digest_counts['read_thru'] += 1
                             if ri.has_tag('SA'):
