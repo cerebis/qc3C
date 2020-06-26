@@ -103,7 +103,7 @@ class Digest(object):
                     _junctions[_junc_seq] = ligation_info(str(a.enzyme), str(b.enzyme),
                                                           _junc_seq, _vest_seq,
                                                           len(_junc_seq), len(_vest_seq),
-                                                          re.compile(_junc_seq.replace('N', '.')),
+                                                          re.compile(_junc_seq.replace('N', '[ACGT]')),
                                                           str(a.enzyme) == str(b.enzyme))
             return _junctions
 
@@ -132,18 +132,19 @@ class Digest(object):
 
         # cut-sites for the specified enzymes
         self.any_cutsite = re.compile('({})'.format('|'.join(
-            sorted(self.cutsites, key=lambda x: (-len(x), x))).replace('N', '.')))
+            sorted(self.cutsites, key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
         self.end_cutsite = re.compile('{}$'.format(self.any_cutsite.pattern))
 
         # Hi-C ligation junctions, which can be any combination of ends made from enzyme cocktail
         self.any_junction = re.compile('({})'.format('|'.join(
-            sorted(self.junctions, key=lambda x: (-len(x), x))).replace('N', '.')))
+            sorted(self.junctions, key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
         self.end_junction = re.compile('{}$'.format(self.any_junction.pattern))
 
         # Digested ends, which are religated will not necessarily possess the entire
         # cut-site, but will possess a remnant/vestigial sequence
         self.any_vestigial = re.compile('({})'.format('|'.join(
-            sorted(set([v.vestigial for v in self.junctions.values()]), key=lambda x: (-len(x), x))).replace('N', '.')))
+            sorted(set([v.vestigial for v in self.junctions.values()]),
+                   key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
         self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
 
     def unique_vestigial(self) -> List['Digest.DerivedString']:
