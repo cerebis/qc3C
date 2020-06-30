@@ -30,7 +30,7 @@ setuptools.setup(
 
     install_requires=[
         'astropy',
-        'biopython',
+        'biopython==1.76',
         'leven',
         'json2html',
         'numba',
