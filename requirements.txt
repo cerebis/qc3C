@@ -1,5 +1,5 @@
 astropy
-biopython
+biopython==1.76
 json2html
 leven
 numba
