@@ -1,5 +1,6 @@
 import bz2
 import gzip
+import itertools
 import numpy as np
 import pandas
 import subprocess
@@ -7,6 +8,7 @@ import tqdm
 import logging
 
 from collections import namedtuple, defaultdict
+from collections import Counter as collectionsCounter
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
@@ -93,6 +95,133 @@ class Counter(object):
             return self.count(category) / self.analysed()
         else:
             raise RuntimeError('parameter \"against\" must be one of [accepted, analysed or all]')
+
+
+def choice(options, probs, rs):
+    """
+    A faster method for non-uniform selection, when compared
+    to numpy.random.choice.
+
+    NOTE This could be further doubled in speed, if numba is used,
+    however an initialised random state in numba is only maintained
+    within the invoking code block and therefore a larger method would
+    have to encapsulate this method.
+
+    :param options: the list of options from which to select
+    :param probs: the probability of each choice
+    :param rs: numpy random state
+    :return: a randomly chosen option
+    """
+    x = rs.rand()
+    cum = 0
+    i = 0
+    for i, p in enumerate(probs):
+        cum += p
+        if x < cum:
+            break
+    return options[i]
+
+
+class ReadMarkovModeller:
+    """
+    Employ a k-th order Markov model to learn the composition of a read-set  and thereby
+    generate simulated reads of the same composition.
+
+    This model can then be used to estimate the frequency of occurrence of a set
+    of target sequences within a read-set.
+
+    Users of this class must add k-mer observations by passing string-based DNA
+    sequences to the instance via += operator. The higher the order of the model (larger
+    the k-mer) the more observations will be required to achieve reasonable coverage
+    of all k-mer transitions.
+    """
+
+    def __init__(self, kmer_size: int):
+        """
+        The chosen k-mer size should be much smaller than the expected length of the
+        target sequences.
+        :param kmer_size: the order of the markov model and size of k-mer.
+        """
+        self.kmer_size = kmer_size
+        self.counts = collectionsCounter()
+        self.counts_plus_one = collectionsCounter()
+        self.trans_prob = None
+        self.total_obs = 0
+
+    def __iadd__(self, other: str):
+        """
+        Add the k-mers for the given sequence to the markov model accumulators.
+        :param other: a read sequence
+        """
+        other = other.upper().encode()
+        # count k-mer and k+1-mers for the read-set
+        self.counts.update(other[i: i+self.kmer_size] for i in range(len(other) - self.kmer_size + 1))
+        self.counts_plus_one.update(other[i: i+self.kmer_size+1] for i in range(len(other) - self.kmer_size))
+        self.total_obs += 1
+        return self
+
+    def prepare_model(self):
+        """
+        Once some training data has been added, this method will prepare the transition
+        probability data structure for use in simulating reads.
+
+        This method can be called more than once, but there will be no change unless
+        new k-mer data is added.
+        """
+        # filter k-mers containing ambiguous bases
+        self.counts = {k: v for k, v in self.counts.items() if b'N' not in k}
+
+        # rather than rely on kmers from counts, we will assume there
+        # are missing observations and instead explicitly iterate
+        # over all possibilities.
+        uniform_prob = np.array([0.25] * 4)
+        self.trans_prob = {}
+        for kmer in [bytes(a) for a in itertools.product(b'ACGT', repeat=self.kmer_size)]:
+            if kmer not in self.counts:
+                # if we didn't see the kmer, assume uniform probability
+                self.trans_prob[kmer] = uniform_prob
+            else:
+                # generate the four posssible k+1-mers
+                plus_ones = [kmer + nt for nt in [b'A', b'C', b'G', b'T']]
+                # get the counts for these possibilities
+                next_counts = np.array([self.counts_plus_one[po] if po else 0 for po in plus_ones])
+                # transition probabilities for this k-mer to the next 4 possibilities
+                self.trans_prob[kmer] = next_counts / next_counts.sum()
+
+    def estimate_freq(self, targets: List[str], sample_size: int, seed: int = None) -> float:
+        """
+        Compute the expected frequency at which any of the target sequences appear in reads
+        simulated from the model.
+
+        :param targets: the target sequences for which to estimate occurrence rate
+        :param sample_size: the number of simulated reads to use for the estimation
+        :param seed: a random seed.
+        :return: the estimated frequency
+        """
+        if seed is None:
+            rs = np.random.RandomState()
+        else:
+            rs = np.random.RandomState(seed)
+
+        # simulate sequences at the target read length and count the fraction
+        # that contain the junction sequence(s)
+        acgt = bytearray(b'ACGT')
+        # convert the list of junctions to a set of bytes
+        targets = set(ti.encode() for ti in targets)
+        containing_reads = 0
+        all_kmers = list(self.trans_prob)
+        for _ in range(sample_size):
+            # choose a kmer uniformly
+            kmer = all_kmers[rs.randint(0, len(all_kmers))]
+            # start the simulated sequence from this
+            sim_seq = bytearray(kmer + (b'N' * (150 - self.kmer_size)))
+            for i in range(self.kmer_size, len(sim_seq)):
+                sim_seq[i] = choice(acgt, self.trans_prob[bytes(sim_seq[i-self.kmer_size: i])], rs)
+            # does our simulated sequence contain the junction?
+            if any(ti in sim_seq for ti in targets):
+                containing_reads += 1
+
+        return containing_reads / sample_size
 
 
 def open_input(file_name: str) -> TextIO:
@@ -252,6 +381,7 @@ def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -
 
 def next_read(filename: str, searcher, longest_site: int, k_size: int,
               prob_accept: float, progress, counts: Counter,
+              markov_model: ReadMarkovModeller,
               tracker: Dict[Digest.DerivedString, int], no_user_limit: bool,
               random_state: np.random.RandomState) -> Tuple[str,
                                                             Optional[int],
@@ -269,6 +399,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
     :param prob_accept: probability threshold used to subsample the full read-set
     :param progress: progress bar for user feedback
     :param counts: a tracker class for various rejection conditions
+    :param markov_model: read markov model instance for later simulation
     :param tracker: a tracker for junction kmer types
     :param no_user_limit: a user limit has not been set
     :param random_state: random state for subsampling
@@ -283,6 +414,9 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
         if no_user_limit:
             # no limit has been set, track all progress
             progress.update()
+
+        # add every available sequence to the markov model
+        markov_model += _seq
 
         # subsampling read-set
         if prob_accept is not None and prob_accept < unif():
@@ -324,7 +458,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
-        
+
     :param enzyme_names: the enzymes used during digestion (max 2)
     :param kmer_db: the jellyfish kmer database
     :param read_files: the list of read files in FastQ format.
@@ -401,6 +535,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     if mean_insert < 100:
         logging.warning('Mean insert length of {}bp is quite short'.format(mean_insert))
 
+    # *** the following logic for libraries is not presently used ***
     # Currently there is only special logic for Phase kits
     # whose proximity inserts appear to possess a non-uniform
     # distribution of junction location
@@ -458,6 +593,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     starts_with_cutsite = 0
     cumulative_length = 0
 
+    markov_model = ReadMarkovModeller(4)
+
     logger.info('Beginning analysis...')
 
     # count the available reads if not max_obs not set
@@ -496,8 +633,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
             # set up the generator over FastQ reads, with sub-sampling
             fq_reader = next_read(reads, digest.junction_searcher('find'), longest_site, k_size,
-                                  sample_rate, progress, analysis_counter, junction_tracker,
-                                  not user_limited, random_state)
+                                  sample_rate, progress, analysis_counter, markov_model,
+                                  junction_tracker, not user_limited, random_state)
 
             while True:
 
@@ -592,6 +729,14 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     if analysis_counter.fraction('rejected') > 0.9:
         logger.warning('More than 90% of reads were rejected')
 
+    # use Markov model to estimate expected junction seq freq in reads
+    logger.info('The read markov model accumulated {:,} reads'.format(markov_model.total_obs))
+    logger.info('Estimating natural occurrence rate of digest junctions ...')
+    markov_model.prepare_model()
+    natural_rate = markov_model.estimate_freq(digest.unambiguous_junctions(), 50000, seed)
+    logger.info('Expected fraction of reads in which a junction sequence naturally occur: {:#.4g}%'
+                .format(natural_rate * 100))
+
     #
     # Reporting
     #
@@ -617,6 +762,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         'n_high_cov': analysis_counter.count('high_cov'),
         'n_low_cov': analysis_counter.count('low_cov'),
         'n_zero_cov': analysis_counter.count('zero_cov'),
+        'natural_rate': natural_rate,
+        'n_model_obs': markov_model.total_obs,
     }
 
     logger.info('Number of parsed reads: {:,}'
@@ -737,7 +884,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         report['raw_fraction'] = hic_frac
         logger.info('Estimated raw Hi-C read fraction via p-value sum method: 95% CI [{:#.4g},{:#.4g}]'
-                    .format(*hic_frac * 100))
+                    .format(*(hic_frac - 0.5*natural_rate) * 100))
+
         if np.any((1 - obs_frac) < 0):
             obs_frac = 1
             logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
@@ -754,7 +902,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 report['adj_fraction'] = None
             else:
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
-                            .format(*(hic_frac * 1/obs_frac) * 100))
+                            .format(*((hic_frac - 0.5*natural_rate) * 1/obs_frac) * 100))
 
         report['unobs_fraction'] = 1 - obs_frac[::-1]
 
