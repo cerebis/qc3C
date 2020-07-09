@@ -1,19 +1,18 @@
 import bz2
 import gzip
-import itertools
 import numpy as np
 import pandas
 import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple, defaultdict
-from collections import Counter as collectionsCounter
+from collections import namedtuple
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report
+from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report, observed_fraction, \
+    ReadMarkovModeller
 from qc3C._version import runtime_info
 
 try:
@@ -122,108 +121,6 @@ def choice(options, probs, rs):
     return options[i]
 
 
-class ReadMarkovModeller:
-    """
-    Employ a k-th order Markov model to learn the composition of a read-set  and thereby
-    generate simulated reads of the same composition.
-
-    This model can then be used to estimate the frequency of occurrence of a set
-    of target sequences within a read-set.
-
-    Users of this class must add k-mer observations by passing string-based DNA
-    sequences to the instance via += operator. The higher the order of the model (larger
-    the k-mer) the more observations will be required to achieve reasonable coverage
-    of all k-mer transitions.
-    """
-
-    def __init__(self, kmer_size: int):
-        """
-        The chosen k-mer size should be much smaller than the expected length of the
-        target sequences.
-        :param kmer_size: the order of the markov model and size of k-mer.
-        """
-        self.kmer_size = kmer_size
-        self.counts = collectionsCounter()
-        self.counts_plus_one = collectionsCounter()
-        self.trans_prob = None
-        self.total_obs = 0
-
-    def __iadd__(self, other: str):
-        """
-        Add the k-mers for the given sequence to the markov model accumulators.
-        :param other: a read sequence
-        """
-        other = other.upper().encode()
-        # count k-mer and k+1-mers for the read-set
-        self.counts.update(other[i: i+self.kmer_size] for i in range(len(other) - self.kmer_size + 1))
-        self.counts_plus_one.update(other[i: i+self.kmer_size+1] for i in range(len(other) - self.kmer_size))
-        self.total_obs += 1
-        return self
-
-    def prepare_model(self):
-        """
-        Once some training data has been added, this method will prepare the transition
-        probability data structure for use in simulating reads.
-
-        This method can be called more than once, but there will be no change unless
-        new k-mer data is added.
-        """
-        # filter k-mers containing ambiguous bases
-        self.counts = {k: v for k, v in self.counts.items() if b'N' not in k}
-
-        # rather than rely on kmers from counts, we will assume there
-        # are missing observations and instead explicitly iterate
-        # over all possibilities.
-        uniform_prob = np.array([0.25] * 4)
-        self.trans_prob = {}
-        for kmer in [bytes(a) for a in itertools.product(b'ACGT', repeat=self.kmer_size)]:
-            if kmer not in self.counts:
-                # if we didn't see the kmer, assume uniform probability
-                self.trans_prob[kmer] = uniform_prob
-            else:
-                # generate the four posssible k+1-mers
-                plus_ones = [kmer + nt for nt in [b'A', b'C', b'G', b'T']]
-                # get the counts for these possibilities
-                next_counts = np.array([self.counts_plus_one[po] if po else 0 for po in plus_ones])
-                # transition probabilities for this k-mer to the next 4 possibilities
-                self.trans_prob[kmer] = next_counts / next_counts.sum()
-
-    def estimate_freq(self, targets: List[str], sample_size: int, seed: int = None) -> float:
-        """
-        Compute the expected frequency at which any of the target sequences appear in reads
-        simulated from the model.
-
-        :param targets: the target sequences for which to estimate occurrence rate
-        :param sample_size: the number of simulated reads to use for the estimation
-        :param seed: a random seed.
-        :return: the estimated frequency
-        """
-        if seed is None:
-            rs = np.random.RandomState()
-        else:
-            rs = np.random.RandomState(seed)
-
-        # simulate sequences at the target read length and count the fraction
-        # that contain the junction sequence(s)
-        acgt = bytearray(b'ACGT')
-        # convert the list of junctions to a set of bytes
-        targets = set(ti.encode() for ti in targets)
-        containing_reads = 0
-        all_kmers = list(self.trans_prob)
-        for _ in range(sample_size):
-            # choose a kmer uniformly
-            kmer = all_kmers[rs.randint(0, len(all_kmers))]
-            # start the simulated sequence from this
-            sim_seq = bytearray(kmer + (b'N' * (150 - self.kmer_size)))
-            for i in range(self.kmer_size, len(sim_seq)):
-                sim_seq[i] = choice(acgt, self.trans_prob[bytes(sim_seq[i-self.kmer_size: i])], rs)
-            # does our simulated sequence contain the junction?
-            if any(ti in sim_seq for ti in targets):
-                containing_reads += 1
-
-        return containing_reads / sample_size
-
-
 def open_input(file_name: str) -> TextIO:
     """
     Open a text file for input. The filename is used to indicate if it has been
@@ -290,7 +187,8 @@ def assign_empirical_pvalues_all(_df):
 
     # get the observations which did not contain a junction
     # these are our cases where the NULL hypothesis is true
-    _no_junc = _df.loc[~_df.has_junc, _cols].values
+    # NOTE as has_junc is categorical, we must use a logical comparison
+    _no_junc = _df.loc[_df.has_junc == False, _cols].values
     _no_junc[:, 1] = -1
 
     # reduce this to the set of unique ratios. The returned
@@ -338,7 +236,7 @@ def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     q = 1 - df.loc[df.has_junc, 'pvalue'].to_numpy(np.float)
 
     # mean value and error
-    n_frag_obs = len(df)
+    n_frag_obs = len(set(df.seq))
     _mean = q.sum() / n_frag_obs
     _err = np.sqrt((q * (1-q)).sum()) / n_frag_obs
 
@@ -477,6 +375,29 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     :param merged_reads: supplied reads are merged pairs, covering whole insert
     """
 
+    def extract_sample(_df: pandas.DataFrame, _frac: float, _min_n: int, _max_n: int,
+                       _rs: np.random.RandomState) -> pandas.DataFrame:
+        """
+        Extract a sample from a larger table, where random selection is upon fragment id. This
+        maintains pairs across the sampling process.
+        :param _df: the larger dataframe to select from
+        :param _frac: the desired fraction of obs to take in a sample
+        :param _min_n: minimum number of obs to take in a sample
+        :param _max_n: maximum number of obs to take in a sample
+        :param _rs: a numpy random state
+        :return: the sampled dataframe
+        """
+        n_sample = int(len(_df) * _frac)
+        if n_sample < _min_n:
+            logger.debug('Observation pool is small, limiting sample size to {}'.format(_min_n))
+            n_sample = _min_n
+        if n_sample > _max_n:
+            logger.debug('Observation pool is large, limiting sample size to {}'.format(_max_n))
+            n_sample = _max_n
+
+        ix = np.unique(_rs.choice(_df.seq, size=n_sample))
+        return _df.set_index('seq').loc[ix].reset_index()
+
     def collect_coverage(seq: str, ix: int, site_size: int, k: int) -> (float, float):
         """
         Collect the k-mer coverage centered around the position ix. From the left, the sliding
@@ -520,7 +441,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                 raise ZeroCoverageException()
 
         cov_inner, cov_outer = gmean(inner), gmean(outer)
-        if cov_outer < 2:
+        if cov_outer < 1:
             raise LowCoverageException()
         return cov_inner, cov_outer
 
@@ -593,7 +514,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     starts_with_cutsite = 0
     cumulative_length = 0
 
-    markov_model = ReadMarkovModeller(4)
+    markov_model = ReadMarkovModeller(4, 1234, 0, digest.unambiguous_junctions())
 
     logger.info('Beginning analysis...')
 
@@ -619,8 +540,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
     analysis_counter = Counter()
     coverage_obs = []
-
-    obs_fragments = defaultdict(int)
 
     any_site_match = digest.cutsite_searcher('startswith')
     junction_tracker = digest.tracker('junction')
@@ -702,8 +621,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
                 cumulative_length += seq_len
 
-                obs_fragments[_id] += 1
-
                 # record this observation
                 coverage_obs.append(CovInfo(mean_inner, mean_outer, has_junc, ix, _id, seq_len, junc_seq))
 
@@ -731,11 +648,37 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
     # use Markov model to estimate expected junction seq freq in reads
     logger.info('The read markov model accumulated {:,} reads'.format(markov_model.total_obs))
-    logger.info('Estimating natural occurrence rate of digest junctions ...')
+    logger.info('Estimating natural occurrence rate of digest junctions...')
     markov_model.prepare_model()
-    natural_rate = markov_model.estimate_freq(digest.unambiguous_junctions(), 50000, seed)
+    natural_rate = markov_model.estimate_freq(10000)
     logger.info('Expected fraction of reads in which a junction sequence naturally occur: {:#.4g}%'
                 .format(natural_rate * 100))
+
+    def locals_from_4mer(_rmc: ReadMarkovModeller, kmer_target: bytes) -> pandas.DataFrame:
+        d = dict(zip(_rmc.kmers, _rmc.kmers_prob))
+        nt_lookup = {ord(b'A'): 0, ord(b'C'): 1, ord(b'G'): 2, ord(b'T'): 3}
+        probs = []
+        for i in range(8):
+            for nt in [(c, n) for n, c in enumerate(b'ACGT')]:
+                _kmer = bytearray(kmer_target)
+                if _kmer[i] != nt[0]:
+                    _kmer[i] = nt[0]
+                    _kmer = bytes(_kmer)
+                    p = d[_kmer[:4]]
+                    for j in range(4):
+                        p *= _rmc.trans_prob[_kmer[j:j+4]][nt_lookup[_kmer[j+4]]]
+                    probs.append((_kmer, p))
+        p = d[kmer_target[:4]]
+        for i in range(4):
+            p *= _rmc.trans_prob[kmer_target[i:i+4]][nt_lookup[kmer_target[i+4]]]
+        probs.append((kmer_target, p))
+
+        return (pandas.DataFrame(probs, columns=['kmer', 'prob'])
+                .sort_values('prob', ascending=False)
+                .set_index('kmer'))
+
+    df = locals_from_4mer(markov_model, b'GATCGATC')
+    df.to_csv('{}.4mer.csv'.format(report_path))
 
     #
     # Reporting
@@ -808,13 +751,15 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         # lets do some tabular munging, making sure that our categories are explicit
         all_df = pandas.DataFrame(coverage_obs)
+        # make the boolean explicitly categorical so that a count of zero can be returned below
+        all_df['has_junc'] = pandas.Categorical(all_df.has_junc, categories=[True, False])
 
         # remove any row which had zero coverage in inner or outer region
         z_inner = all_df.mean_inner == 0
         z_outer = all_df.mean_outer == 0
         nz_either = ~(z_inner | z_outer)
         all_df = all_df[nz_either]
-        logger.debug('Removed rows with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
+        logger.debug('Rows removed due to zero coverage: inner {:,}, outer {:,}, shared {:,}'.format(
             sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
         # inspect the tally of observations with/without junctions
@@ -849,62 +794,76 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
                     .format(sum(1 / 4 ** li.junc_len for li in digest.junctions.values()) * 100))
 
-        n_read_obs = sum(obs_fragments.values())
-        n_frag_obs = len(obs_fragments)
+        # the total number of read observations
+        n_read_obs = len(all_df)
+        # the number of unique sequence ids is assumed to be the number of fragment observations
+        n_frag_obs = len(set(all_df.seq))
         logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
 
-        if n_read_obs == n_frag_obs and not merged_reads:
-            logger.warning('The number of fragments equals the number of reads. Should "--merged-reads" have been set?')
+        if n_read_obs == n_frag_obs:
+            logger.warning('The number of fragments equals the number of reads, '
+                           'while it is expected that Hi-C data is paired.')
         logger.info('Fragment observational redundancy: {:.4g}'.format(n_read_obs / n_frag_obs))
 
-        # estimate CI using resampling
-        _sample_est = []
-        for i in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
-            _smpl = assign_empirical_pvalues_all(
-                all_df.sample(frac=0.8, replace=False, random_state=random_state)
-                      .drop_duplicates('seq'))
-            # keep track of the raw p-value for each sample
-            _stats = pvalue_expectation(_smpl)
-            # the total extent of reads in sample
-            _obs_extent = _smpl.read_len.sum()
-            # the number of fragments is assumed to be the unique number of reads
-            _n_frags = len(set(_smpl.seq))
-            # also keep track of the fraction of extent observed for each sample
-            if merged_reads:
-                _stats['obs_frac'] = 1
-            else:
-                _stats['obs_frac'] = _obs_extent / (mean_insert * _n_frags)
-            _sample_est.append(_stats)
+        if n_read_obs < 500 or n_frag_obs < 500:
+            # Single estimation for a small observation pool
+            small_pool = True
+            logger.warn('The number of observations was small, bootstrapping will not be performed')
+            _est = pvalue_expectation(assign_empirical_pvalues_all(all_df))
+            hic_frac = np.array([_est['mean'] - _est['error'], _est['mean'] + _est['error']])
+            logger.info('Estimated raw Hi-C read fraction from a single sample via '
+                        'p-value sum method: {:#.4g} - {:#.4g} %'
+                        .format(*hic_frac * 100))
 
-        # we're lazy, lets do the data manipulations with pandas
-        _sample_est = pandas.DataFrame(_sample_est)
-        # Use the 95% quantiles from the bootstrap samples
-        hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
-        obs_frac = _sample_est['obs_frac'].quantile(q=[0.025, 0.975]).values
+        else:
+            # Use bootstrap resampling to estimate confidence interval
+            small_pool = False
+            _sample_est = []
+            for i in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
+                # calculate p-values using a sample of observations
+                _smpl = assign_empirical_pvalues_all(extract_sample(all_df, 2/3, 100, 100000, random_state))
+                # estimate hi-c fraction for this sample
+                _sample_est.append(pvalue_expectation(_smpl))
+            _sample_est = pandas.DataFrame(_sample_est)
+
+            # CI defined by 95% quantile range
+            hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
+            logger.info('Estimated raw Hi-C read fraction from bootstrap resampling '
+                        'via p-value sum method: 95% CI [{:#.4g},{:#.4g}] %'
+                        .format(*hic_frac * 100))
 
         report['raw_fraction'] = hic_frac
-        logger.info('Estimated raw Hi-C read fraction via p-value sum method: 95% CI [{:#.4g},{:#.4g}]'
-                    .format(*(hic_frac - 0.5*natural_rate) * 100))
 
-        if np.any((1 - obs_frac) < 0):
+        obs_frac = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
+
+        if 1 - obs_frac < 0:
+            # TODO this is likely to be removed with latest code for obs frac
             obs_frac = 1
             logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
                            'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, 1 - obs_frac[::-1]))
+                           .format(mean_insert, 1))
         else:
-            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: '
-                        '95% CI [{:#.4g},{:#.4g}]'
-                        .format(mean_insert, * 1 - obs_frac[::-1]))
+            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                        .format(mean_insert, 1 - obs_frac))
 
             report['adj_fraction'] = hic_frac * 1 / obs_frac
             if np.any(report['adj_fraction'] > 1):
                 logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
                 report['adj_fraction'] = None
             else:
-                logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}]'
-                            .format(*((hic_frac - 0.5*natural_rate) * 1/obs_frac) * 100))
+                if small_pool:
+                    logger.info('Estimated Hi-C read fraction adjusted for unobserved: {:#.4g} - {:#.4g} %'
+                                .format(*hic_frac * 1/obs_frac * 100))
+                    logger.info('Estimated Hi-C read fraction adjusted for unobserved and natural: {:#.4g} - {:#.4g} %'
+                                .format(*(hic_frac - 0.5*natural_rate) * 1/obs_frac * 100))
+                else:
+                    logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
+                                .format(*hic_frac * 1/obs_frac * 100))
+                    logger.info('Estimated Hi-C read fraction adjusted for unobserved '
+                                'and natural: 95% CI [{:#.4g},{:#.4g}] %'
+                                .format(*(hic_frac - 0.5*natural_rate) * 1/obs_frac * 100))
 
-        report['unobs_fraction'] = 1 - obs_frac[::-1]
+        report['unobs_fraction'] = 1 - obs_frac
 
         report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
                                'junctions': digest.to_dict('junction')}
@@ -922,10 +881,11 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             with gzip.open(output_table, 'wt') as out_h:
                 all_df.to_csv(out_h, sep='\t')
 
-    finally:
+    except InsufficientDataException as e:
+        logger.warning(e)
 
+    finally:
         if not no_json:
             write_jsonline(report_path, report, suffix='json', append=False)
-
         if not no_html:
             write_html_report(report_path, report)

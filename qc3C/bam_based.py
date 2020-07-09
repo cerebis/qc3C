@@ -868,7 +868,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                            .format(emp_median))
         else:
             logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(emp_median, unobs_frac * 100))
+                        .format(emp_median, unobs_frac))
 
         report['unobs_fraction'] = unobs_frac
 

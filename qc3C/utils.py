@@ -1,18 +1,24 @@
 import bz2
 import gzip
+import itertools
 import logging
+from collections import Counter as collectionsCounter
+
 import numpy as np
 import os
 import simplejson as json
 import subprocess
 
 from hashlib import sha256
+
+import tqdm
 from json2html import json2html
 from scipy.stats import beta
-from typing import Optional, TextIO, Dict
+from typing import Optional, TextIO, Dict, List
 from typing.re import Pattern as tPattern
 from mimetypes import guess_type
 from .exceptions import ApplicationException
+from .kmer_based import choice
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +72,18 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
         :return:
         """
 
-        frag_mask = np.zeros(insert_len, dtype=np.bool)
-        read_mask = np.zeros(read_len, dtype=np.bool)
+        frag_mask = np.zeros(insert_len, dtype=np.uint8)
+        read_mask = np.zeros(read_len, dtype=np.uint8)
         x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
         # create a read mask that represents the region of the read which can be interrogated
-        read_mask[x_min:x_max] = True
+        read_mask[x_min:x_max] = 1
         # create a fragment mask by transferring this silhouette to either end of the fragment
         # handling the edge-case where the insert length is less than the read length
         a = read_len if read_len < insert_len else insert_len
-        frag_mask[:a] |= read_mask[:a]
+        frag_mask[:a] += read_mask[:a]
         if not is_single:
             # treat both ends if paired
-            frag_mask[-a:] |= read_mask[::-1][-a:]
+            frag_mask[-a:] += read_mask[::-1][-a:]
         # return the fragment mask
         return frag_mask
 
@@ -301,20 +307,166 @@ def write_html_report(fpath: str, report: Dict):
         fpath = f'{fpath}.html'
     with open(fpath, 'wt') as fp:
         fp.write("""
-<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
-<html lang="en">
-<head>
-        <title>qc3C report</title>
-        <style>
-            table {border: 1px solid black; border-collapse: collapse;}
-            td {padding: 5px; border: 1px solid black;}
-            th {padding: 5px; border: 1px solid black; background-color: lightblue;}
-            ul {list-style-type: none; padding: 0; margin: 0;}
-            li {padding: 0 0 5px 0;}
-        </style>
-    </head>
-    <body>
-""")
+            <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+            <html lang="en">
+            <head>
+                    <title>qc3C report</title>
+                    <style>
+                        table {border: 1px solid black; border-collapse: collapse;}
+                        td {padding: 5px; border: 1px solid black;}
+                        th {padding: 5px; border: 1px solid black; background-color: lightblue;}
+                        ul {list-style-type: none; padding: 0; margin: 0;}
+                        li {padding: 0 0 5px 0;}
+                    </style>
+                </head>
+                <body>
+        """)
         _html_table = json2html.convert(to_json_string(report), table_attributes='', escape=True)
         fp.write('        {}\n'.format(_html_table))
         fp.write("    </body>\n</html>")
+
+
+class ReadMarkovModeller:
+    """
+    Use a k-th order Markov model to compute the expected number of junction
+    sequences that would occur in a set of sequences with the given composition
+    """
+
+    def __init__(self, kmer_size: int, seed: int, reject_prob: float, targets: List[str]):
+        """
+        :param kmer_size:
+        :param seed:
+        :param reject_prob:
+        :param targets:
+        """
+        self.kmer_size = kmer_size
+        self.counts = collectionsCounter()
+        self.counts_plus_one = collectionsCounter()
+        self.trans_prob = None
+        self.kmers_prob = None
+        self.kmers = None
+        self.reject_prob = reject_prob
+        self.targets = [ti.encode() for ti in targets]
+        self.random_state = np.random.RandomState(seed)
+        self.total_obs = 0
+        self.total_extent = 0
+
+    def average_read_length(self) -> int:
+        """
+        :return: Average read length accumulated by the model instance
+        """
+        return self.total_extent // self.total_obs
+
+    @staticmethod
+    def filter_n(kmer_dict: collectionsCounter) -> Dict[bytes, int]:
+        """
+        Remove records whose k-mer contains one or more Ns
+        """
+        return {k: v for k, v in kmer_dict.items() if b'N' not in k}
+
+    def contains_target(self, s):
+        return any(ti in s for ti in self.targets)
+
+    def prepare_model(self):
+        """
+        Once some training data has been added, this method will prepare the transition
+        probabilty data structure for use in simulating reads.
+        """
+        # filter k-mers containing ambiguous bases
+        clean_counts = ReadMarkovModeller.filter_n(self.counts)
+
+        # rather than rely on kmers from counts, we will assume there
+        # are missing observations and instead explicitly iterate
+        # over all possibilities.
+        self.kmers = [bytes(ki) for ki in itertools.product(b'ACGT', repeat=self.kmer_size)]
+        # assign probabilities for each kmer
+        self.kmers_prob = [clean_counts[kmer] if kmer in clean_counts else 1 for kmer in self.kmers]
+        # normalise these counts to probs
+        self.kmers_prob = np.array(self.kmers_prob, dtype=np.float)
+        self.kmers_prob /= self.kmers_prob.sum()
+
+        uniform_prob = np.array([0.25] * 4)
+        self.trans_prob = {}
+        for kmer in self.kmers:
+            if kmer not in clean_counts:
+                # if we didn't see the kmer, assume uniform probability
+                self.trans_prob[kmer] = uniform_prob
+            else:
+                # generate the four posssible k+1-mers
+                plus_ones = [kmer + nt for nt in [b'A', b'C', b'G', b'T']]
+                # get the counts for these possibilities
+                next_counts = np.array([self.counts_plus_one[po] if po else 0 for po in plus_ones])
+                # transition probabilities for this k-mer to the next 4 possibilities
+                self.trans_prob[kmer] = next_counts / next_counts.sum()
+
+    def find_target_mid(self, seq: bytes) -> Optional[int]:
+        """
+        Find target sequences within a read and return the modpoint of the
+        matched region. Only the first match is found.
+
+        :param seq: the sequence to search
+        """
+        self.random_state.shuffle(self.targets)
+        for ti in self.targets:
+            ix = seq.find(ti)
+            if ix != -1:
+                return ix + len(ti) // 2
+        return None
+
+    def __iadd__(self, other: str):
+        """
+        Introduce another sequence for training model. In the case of reads which contain
+        a target sequence, split the reads at the target sequence midpoint prior to extracting
+        k-mers from each end. This aims to suppress k-mer bias in high quality libraries which
+        contain a high proportion of target sequences.
+
+        :param other: (sequence is assumed to already be upper case)
+        """
+        other = other.upper().encode()
+
+        # split reads containing junction at midpoint at given rate
+        # this surpresses Hi-C signal bias which is a problem for high quality libraries
+        if self.contains_target(other) and self.random_state.uniform() < self.reject_prob:
+            break_point = self.find_target_mid(other)
+            for oi in [other[:break_point], other[break_point:]]:
+                # extract k and k+1 mers
+                self.counts.update(oi[i: i+self.kmer_size] for i in range(len(oi) - self.kmer_size + 1))
+                self.counts_plus_one.update(oi[i: i+self.kmer_size+1] for i in range(len(oi) - self.kmer_size))
+        else:
+            # extract k and k+1 mers
+            self.counts.update(other[i: i+self.kmer_size] for i in range(len(other) - self.kmer_size + 1))
+            self.counts_plus_one.update(other[i: i+self.kmer_size+1] for i in range(len(other) - self.kmer_size))
+
+        self.total_obs += 1
+        self.total_extent += len(other)
+        return self
+
+    def estimate_freq(self, sample_size: int) -> float:
+        """
+        Compute the expected frequency at which any of the target sequences appear in reads
+        simulated from the model.
+
+        :param sample_size:
+        :return:
+        """
+
+        read_len = int(self.average_read_length())
+
+        # simulate sequences at the target read length and count the fraction
+        # that contain the junction sequence(s)
+        acgt = bytearray(b'ACGT')
+        # convert the list of junctions to a set of bytes
+        containing_reads = 0
+        # generate an initial starting point for each read
+        initial_kmers = self.random_state.choice(self.kmers, size=sample_size, p=self.kmers_prob)
+        for kmer in tqdm.tqdm(initial_kmers):
+            # choose a kmer based on observed prob
+            # start the simulated sequence from this
+            sim_seq = bytearray(kmer + (b'N' * (read_len - self.kmer_size)))
+            for i in range(self.kmer_size, len(sim_seq)):
+                sim_seq[i] = choice(acgt, self.trans_prob[bytes(sim_seq[i-self.kmer_size: i])], self.random_state)
+            # does our simulated sequence contain the junction?
+            if self.contains_target(sim_seq):
+                containing_reads += 1
+
+        return containing_reads / sample_size
