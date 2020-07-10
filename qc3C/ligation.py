@@ -2,7 +2,6 @@ import collections
 import contextlib
 import gzip
 import itertools
-import json
 import logging
 import numpy as np
 import os

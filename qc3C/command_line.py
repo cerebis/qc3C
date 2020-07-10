@@ -85,6 +85,8 @@ def main():
                           help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
                           help='Save the collected observations to a file')
+    cmd_kmer.add_argument('-bm', '--bootstraps', type=int, default=50, action=UniqueStore,
+                          help='Number of resampling bootstraps to estimatte CI [50]')
     cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float, action=UniqueStore,
                           help='Ignore regions possessing k-mer frequencies above this quantile [0.9]')
     cmd_kmer.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
@@ -185,7 +187,7 @@ def main():
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
                          no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs,
-                         merged_reads=args.merged_reads)
+                         merged_reads=args.merged_reads, num_bootstraps=args.bootstraps)
 
         elif args.command == 'mkdb':
 

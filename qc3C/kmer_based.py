@@ -11,8 +11,7 @@ from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report, observed_fraction, \
-    ReadMarkovModeller
+from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report, observed_fraction
 from qc3C._version import runtime_info
 
 try:
@@ -94,31 +93,6 @@ class Counter(object):
             return self.count(category) / self.analysed()
         else:
             raise RuntimeError('parameter \"against\" must be one of [accepted, analysed or all]')
-
-
-def choice(options, probs, rs):
-    """
-    A faster method for non-uniform selection, when compared
-    to numpy.random.choice.
-
-    NOTE This could be further doubled in speed, if numba is used,
-    however an initialised random state in numba is only maintained
-    within the invoking code block and therefore a larger method would
-    have to encapsulate this method.
-
-    :param options: the list of options from which to select
-    :param probs: the probability of each choice
-    :param rs: numpy random state
-    :return: a randomly chosen option
-    """
-    x = rs.rand()
-    cum = 0
-    i = 0
-    for i, p in enumerate(probs):
-        cum += p
-        if x < cum:
-            break
-    return options[i]
 
 
 def open_input(file_name: str) -> TextIO:
@@ -279,7 +253,6 @@ def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -
 
 def next_read(filename: str, searcher, longest_site: int, k_size: int,
               prob_accept: float, progress, counts: Counter,
-              markov_model: ReadMarkovModeller,
               tracker: Dict[Digest.DerivedString, int], no_user_limit: bool,
               random_state: np.random.RandomState) -> Tuple[str,
                                                             Optional[int],
@@ -297,7 +270,6 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
     :param prob_accept: probability threshold used to subsample the full read-set
     :param progress: progress bar for user feedback
     :param counts: a tracker class for various rejection conditions
-    :param markov_model: read markov model instance for later simulation
     :param tracker: a tracker for junction kmer types
     :param no_user_limit: a user limit has not been set
     :param random_state: random state for subsampling
@@ -312,9 +284,6 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
         if no_user_limit:
             # no limit has been set, track all progress
             progress.update()
-
-        # add every available sequence to the markov model
-        markov_model += _seq
 
         # subsampling read-set
         if prob_accept is not None and prob_accept < unif():
@@ -514,8 +483,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     starts_with_cutsite = 0
     cumulative_length = 0
 
-    markov_model = ReadMarkovModeller(4, 1234, 0, digest.unambiguous_junctions())
-
     logger.info('Beginning analysis...')
 
     # count the available reads if not max_obs not set
@@ -552,7 +519,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
             # set up the generator over FastQ reads, with sub-sampling
             fq_reader = next_read(reads, digest.junction_searcher('find'), longest_site, k_size,
-                                  sample_rate, progress, analysis_counter, markov_model,
+                                  sample_rate, progress, analysis_counter,
                                   junction_tracker, not user_limited, random_state)
 
             while True:
@@ -646,40 +613,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     if analysis_counter.fraction('rejected') > 0.9:
         logger.warning('More than 90% of reads were rejected')
 
-    # use Markov model to estimate expected junction seq freq in reads
-    logger.info('The read markov model accumulated {:,} reads'.format(markov_model.total_obs))
-    logger.info('Estimating natural occurrence rate of digest junctions...')
-    markov_model.prepare_model()
-    natural_rate = markov_model.estimate_freq(10000)
-    logger.info('Expected fraction of reads in which a junction sequence naturally occur: {:#.4g}%'
-                .format(natural_rate * 100))
-
-    def locals_from_4mer(_rmc: ReadMarkovModeller, kmer_target: bytes) -> pandas.DataFrame:
-        d = dict(zip(_rmc.kmers, _rmc.kmers_prob))
-        nt_lookup = {ord(b'A'): 0, ord(b'C'): 1, ord(b'G'): 2, ord(b'T'): 3}
-        probs = []
-        for i in range(8):
-            for nt in [(c, n) for n, c in enumerate(b'ACGT')]:
-                _kmer = bytearray(kmer_target)
-                if _kmer[i] != nt[0]:
-                    _kmer[i] = nt[0]
-                    _kmer = bytes(_kmer)
-                    p = d[_kmer[:4]]
-                    for j in range(4):
-                        p *= _rmc.trans_prob[_kmer[j:j+4]][nt_lookup[_kmer[j+4]]]
-                    probs.append((_kmer, p))
-        p = d[kmer_target[:4]]
-        for i in range(4):
-            p *= _rmc.trans_prob[kmer_target[i:i+4]][nt_lookup[kmer_target[i+4]]]
-        probs.append((kmer_target, p))
-
-        return (pandas.DataFrame(probs, columns=['kmer', 'prob'])
-                .sort_values('prob', ascending=False)
-                .set_index('kmer'))
-
-    df = locals_from_4mer(markov_model, b'GATCGATC')
-    df.to_csv('{}.4mer.csv'.format(report_path))
-
     #
     # Reporting
     #
@@ -705,8 +638,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         'n_high_cov': analysis_counter.count('high_cov'),
         'n_low_cov': analysis_counter.count('low_cov'),
         'n_zero_cov': analysis_counter.count('zero_cov'),
-        'natural_rate': natural_rate,
-        'n_model_obs': markov_model.total_obs,
     }
 
     logger.info('Number of parsed reads: {:,}'
@@ -808,7 +739,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         if n_read_obs < 500 or n_frag_obs < 500:
             # Single estimation for a small observation pool
             small_pool = True
-            logger.warn('The number of observations was small, bootstrapping will not be performed')
+            logger.warning('The number of observations was small, bootstrapping will not be performed')
             _est = pvalue_expectation(assign_empirical_pvalues_all(all_df))
             hic_frac = np.array([_est['mean'] - _est['error'], _est['mean'] + _est['error']])
             logger.info('Estimated raw Hi-C read fraction from a single sample via '
@@ -819,7 +750,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             # Use bootstrap resampling to estimate confidence interval
             small_pool = False
             _sample_est = []
-            for i in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
+            for _ in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
                 # calculate p-values using a sample of observations
                 _smpl = assign_empirical_pvalues_all(extract_sample(all_df, 2/3, 100, 100000, random_state))
                 # estimate hi-c fraction for this sample
@@ -837,33 +768,28 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         obs_frac = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
 
         if 1 - obs_frac < 0:
-            # TODO this is likely to be removed with latest code for obs frac
-            obs_frac = 1
-            logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
-                           'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                           .format(mean_insert, 1))
+            severe_overlap = True
+            logger.warning('Detected a significant overlap of paired reads due to small fragment size')
+            logger.warning('Double counting risk, you could merge reads prior to quality analysis')
+            logger.warning('Unobserved fraction will be reported as 0')
         else:
+            severe_overlap = False
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
                         .format(mean_insert, 1 - obs_frac))
 
-            report['adj_fraction'] = hic_frac * 1 / obs_frac
-            if np.any(report['adj_fraction'] > 1):
-                logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
-                report['adj_fraction'] = None
+        report['adj_fraction'] = hic_frac * 1 / obs_frac
+        if np.any(report['adj_fraction'] > 1):
+            logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
+            report['adj_fraction'] = None
+        else:
+            if small_pool:
+                logger.info('Estimated Hi-C read fraction adjusted for unobserved: {:#.4g} - {:#.4g} %'
+                            .format(*hic_frac * 1/obs_frac * 100))
             else:
-                if small_pool:
-                    logger.info('Estimated Hi-C read fraction adjusted for unobserved: {:#.4g} - {:#.4g} %'
-                                .format(*hic_frac * 1/obs_frac * 100))
-                    logger.info('Estimated Hi-C read fraction adjusted for unobserved and natural: {:#.4g} - {:#.4g} %'
-                                .format(*(hic_frac - 0.5*natural_rate) * 1/obs_frac * 100))
-                else:
-                    logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
-                                .format(*hic_frac * 1/obs_frac * 100))
-                    logger.info('Estimated Hi-C read fraction adjusted for unobserved '
-                                'and natural: 95% CI [{:#.4g},{:#.4g}] %'
-                                .format(*(hic_frac - 0.5*natural_rate) * 1/obs_frac * 100))
+                logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
+                            .format(*hic_frac * 1/obs_frac * 100))
 
-        report['unobs_fraction'] = 1 - obs_frac
+        report['unobs_fraction'] = 0 if severe_overlap else 1 - obs_frac
 
         report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
                                'junctions': digest.to_dict('junction')}
