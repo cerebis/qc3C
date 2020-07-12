@@ -36,6 +36,8 @@ def main():
     global_parser.add_argument('-d', '--debug', default=False, action='store_true', help='Enable debug output')
     global_parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads [1]')
+    global_parser.add_argument('-o', '--output-path', metavar='PATH', default='.', action=UniqueStore,
+                               help='Write output files to this folder [.]')
 
     analysis_parser = argparse.ArgumentParser(add_help=False)
     analysis_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
@@ -48,12 +50,12 @@ def main():
                                  help='Do not write a JSON report')
     analysis_parser.add_argument('--no-html', default=False, action='store_true',
                                  help='Do not write an HTML report')
-    # analysis_parser.add_argument('-k', '--library-kit', choices=['phase', 'arima'], default=None,
-    #                            help='A commercial library kit [None]')
-    analysis_parser.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append', required=True,
-                                 help='A case-sensitive NEB enzyme name (can be used multiple times)')
-    analysis_parser.add_argument('-o', '--output-path', metavar='PATH', default='.',
-                                 help='Write output files to this folder [.]')
+
+    digestion_group = analysis_parser.add_mutually_exclusive_group(required=True)
+    digestion_group.add_argument('-k', '--library-kit', choices=['phase', 'arima'], default=None, action=UniqueStore,
+                                 help='A commercial library kit')
+    digestion_group.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append',
+                                 help='One or two case-sensitive NEB enzyme names')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
@@ -94,20 +96,19 @@ def main():
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
-                          help='FastQ format reads used in making the kmer database '
-                               '(can be used multiple times)')
+                          help='FastQ format reads that were used to generate the k-mer library')
 
     """
     CLI for creating kmer database
     """
-    cmd_mkdb.add_argument('-s', '--hash-size', default='10M',
+    cmd_mkdb.add_argument('-s', '--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size (eg. 10M, 2G) [10M]')
-    cmd_mkdb.add_argument('-k', '--kmer-size', default=24, type=int,
+    cmd_mkdb.add_argument('-k', '--kmer-size', default=24, type=int, action=UniqueStore,
                           help='Library kmer size [24]')
-    cmd_mkdb.add_argument('-o', '--output', required=True,
-                          help='Output database name')
-    cmd_mkdb.add_argument('FASTQ', nargs='+', help='FastQ read file')
-    cmd_mkdb.add_argument('--output-path', metavar='PATH', default='.', help=argparse.SUPPRESS)
+    cmd_mkdb.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
+                          help='FastQ format reads to use in generating the k-mer library')
+    cmd_mkdb.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
+                          help='Output Jellyfish k-mer library base name')
 
     args = parser.parse_args()
 
@@ -164,8 +165,33 @@ def main():
 
         report_path = os.path.join(args.output_path, __report_name__)
 
+        # check if the user has employed the library kit option to declare enzymes
+        if args.command in {'kmer', 'bam'} and args.library_kit is not None:
+            # commercial kit definitions
+            kit_choices = {'phase': ['Sau3AI', 'MluCI'],
+                           'arima': ['DpnII', 'HinfI']}
+            args.enzyme = kit_choices[args.library_kit]
+            logger.info('Library kit {} declares enzymes {}'.format(args.library_kit, args.enzyme))
+
+        if args.command == 'mkdb':
+
+            if os.path.basename(args.lib) != args.lib:
+                logger.error('The supplied library name should not include any path')
+                sys.exit(1)
+
+            if not args.lib.endswith('.jf'):
+                args.lib = '{}.jf'.format(args.lib)
+
+            klib_path = os.path.join(args.output_path, args.lib)
+
+            if os.path.exists(klib_path):
+                logger.error('Output path already exists: {}'.format(klib_path))
+                sys.exit(1)
+
+            mk_database(klib_path, args.reads, args.kmer_size, args.hash_size, args.threads)
+
         # BAM based analysis
-        if args.command == 'bam':
+        elif args.command == 'bam':
 
             bam.analyse(args.enzyme, args.bam, args.fasta,
                         seed=args.seed, sample_rate=args.sample_rate, threads=args.threads,
@@ -188,16 +214,6 @@ def main():
                          threads=args.threads, output_table=table_path, report_path=report_path,
                          no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs,
                          merged_reads=args.merged_reads, num_bootstraps=args.bootstraps)
-
-        elif args.command == 'mkdb':
-
-            if not args.output.endswith('.jf'):
-                args.output = '{}.jf'.format(args.output)
-            if os.path.exists(args.output):
-                logger.error('Output path already exists: {}'.format(args.output))
-                sys.exit(1)
-
-            mk_database(args.output, args.FASTQ, args.kmer_size, args.hash_size, args.threads)
 
     except ApplicationException as ex:
         logger.error(str(ex))
