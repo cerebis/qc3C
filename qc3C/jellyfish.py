@@ -64,8 +64,8 @@ def mk_database(db_path, fasta_files, kmer_size, hash_size, threads=1):
                         # jellyfish ended normally
                         break
 
-            if return_value > 0:
-                logger.warning('Jellyfish subprocess returned non-zero value: {}'.format(return_value))
+            if return_value is None or return_value > 0 :
+                logger.warning('Jellyfish subprocess did not return 0 (ok). Return value was: {}'.format(return_value))
                 if err:
                     logger.warning('Jellyfish stderr: {}'.format(err.decode()))
             else:
