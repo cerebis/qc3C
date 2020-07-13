@@ -474,8 +474,7 @@ class read_pairs(object):
 
 def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
             seed: int = None, sample_rate: float = None, min_mapq: int = 60, max_obs: int = None,
-            threads: int = 1, report_path: str = None, no_json: bool = False, no_html: bool = False,
-            library_kit: str = 'generic') -> None:
+            threads: int = 1, report_path: str = None, no_json: bool = False, no_html: bool = False) -> None:
     """
     analyse a bam file which contains Hi-C read-pairs mapped to a set of reference sequences.
     This method attempts to assess details which indicate the overall strength of the
@@ -493,20 +492,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     :param report_path: append a report in single-line JSON format to the given path.
     :param no_json: disable json report
     :param no_html: disable html report
-    :param library_kit: the type of kit used in producing the library (ie. phase, generic)
     """
-
-    # Currently there is only special logic for Phase kits
-    # whose proximity inserts appear to possess a non-uniform
-    # distribution of junction location
-    if library_kit == 'phase':
-        logger.info('Phase Genomics library kit, treating junction sites as non-uniformly distributed')
-        is_phase = True
-    elif library_kit == 'generic':
-        logger.info('Generic Hi-C library kit, treating junction sites as uniformly distributed')
-        is_phase = False
-    else:
-        raise UnknownLibraryKitException(library_kit)
 
     assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
     digest = Digest(*enzyme_names, no_ambig=False)
@@ -858,19 +844,12 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     if emp_median is None:
         logger.warning('Unobserved fraction not estimated as insert size was not available')
     else:
-        unobs_frac = 1 - observed_fraction(int(mean_read_len), int(emp_median),
-                                           junc_size=digest.shortest_junction())
-
-        if unobs_frac < 0:
-            unobs_frac = 0
-            logger.warning('For observed insert size of {:.0f}nt, estimated unobserved fraction '
-                           'is invalid (<0). Setting to zero.'
-                           .format(emp_median))
-        else:
+        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), int(emp_median),
+                                                     junc_size=digest.longest_junction())
+        if not severe_overlap:
             logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(emp_median, unobs_frac))
-
-        report['unobs_fraction'] = unobs_frac
+                        .format(emp_median, 1 - obs_frac))
+        report['unobs_fraction'] = 0 if severe_overlap else 1 - obs_frac
 
     # digest statistics
     digest_stats = {'cs_start': digest_counts['cs_start'],

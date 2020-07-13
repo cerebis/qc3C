@@ -321,27 +321,26 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
             sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
             output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
-            library_kit: str = 'generic', num_bootstraps: int = 50, merged_reads: bool = False) -> None:
+            num_sample: int = 50, frac_sample: float = 1 / 3) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
 
     :param enzyme_names: the enzymes used during digestion (max 2)
-    :param kmer_db: the jellyfish kmer database
+    :param kmer_db: the jellyfish k-mer database
     :param read_files: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
-    :param max_freq_quantile: ignore kmers with kmer frequencies above this quantile
+    :param max_freq_quantile: ignore k-mers with k-mer frequencies above this quantile
     :param threads: use additional threads for supported steps
     :param max_obs: the maximum number of reads to inspect
     :param output_table: if not None, write the full pandas table to the specified path
     :param report_path: append a report in single-line JSON format to the given path.
     :param no_json: disable json report
     :param no_html: disable html report
-    :param library_kit: the type of kit used in producing the library (ie. phase, generic)
-    :param num_bootstraps: the number of bootstrap samples to use
-    :param merged_reads: supplied reads are merged pairs, covering whole insert
+    :param num_sample: the number of bootstrap samples to use
+    :param frac_sample: the fraction of observations to use per-bootstrap
     """
 
     def extract_sample(_df: pandas.DataFrame, _frac: float, _min_n: int, _max_n: int,
@@ -424,19 +423,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     assert mean_insert > 0, 'Mean insert length must be greater than zero'
     if mean_insert < 100:
         logging.warning('Mean insert length of {}bp is quite short'.format(mean_insert))
-
-    # *** the following logic for libraries is not presently used ***
-    # Currently there is only special logic for Phase kits
-    # whose proximity inserts appear to possess a non-uniform
-    # distribution of junction location
-    if library_kit == 'phase':
-        logger.info('Phase Genomics library kit, non-uniform junction site distribution')
-        is_phase = True
-    elif library_kit == 'generic':
-        logger.info('Generic Hi-C library kit, uniform junction site distribution')
-        is_phase = False
-    else:
-        raise UnknownLibraryKitException(library_kit)
 
     assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
     digest = Digest(*enzyme_names, no_ambig=False)
@@ -629,7 +615,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                        'mean_insert': mean_insert,
                        'max_freq_quantile': max_freq_quantile,
                        'max_obs': max_obs,
-                       'merged_reads': merged_reads},
+                       'num_sample': num_sample,
+                       'frac_sample': frac_sample
+                       },
         'n_parsed_reads': analysis_counter.counts['all'],
         'n_analysed_reads': analysis_counter.analysed(),
         'n_too_short': analysis_counter.count('short'),
@@ -750,9 +738,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             # Use bootstrap resampling to estimate confidence interval
             small_pool = False
             _sample_est = []
-            for _ in tqdm.tqdm(range(num_bootstraps), desc='Bootstrapping CI'):
+            for _ in tqdm.tqdm(range(num_sample), desc='Bootstrapping CI'):
                 # calculate p-values using a sample of observations
-                _smpl = assign_empirical_pvalues_all(extract_sample(all_df, 2/3, 100, 100000, random_state))
+                _smpl = assign_empirical_pvalues_all(extract_sample(all_df, frac_sample, 100, 100000, random_state))
                 # estimate hi-c fraction for this sample
                 _sample_est.append(pvalue_expectation(_smpl))
             _sample_est = pandas.DataFrame(_sample_est)
@@ -765,15 +753,15 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         report['raw_fraction'] = hic_frac
 
-        obs_frac = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
+        # TODO for multi-digests with varying length ligation products, using the longest
+        #   will lead to overestimating the observered fraction. This could be calculated as
+        #   a weighted sum over abundance of each possible junction.
+        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
 
-        if 1 - obs_frac < 0:
-            severe_overlap = True
-            logger.warning('Detected a significant overlap of paired reads due to small fragment size')
-            logger.warning('Double counting risk, you could merge reads prior to quality analysis')
+        if severe_overlap:
+            logger.warning('Severe pair ooverlap poses double-counting risk, consider merging pairs for quality analysis')
             logger.warning('Unobserved fraction will be reported as 0')
         else:
-            severe_overlap = False
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
                         .format(mean_insert, 1 - obs_frac))
 

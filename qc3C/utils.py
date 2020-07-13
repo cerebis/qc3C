@@ -11,7 +11,7 @@ from hashlib import sha256
 
 from json2html import json2html
 from scipy.stats import beta
-from typing import Optional, TextIO, Dict
+from typing import Optional, TextIO, Dict, Tuple
 from typing.re import Pattern as tPattern
 from mimetypes import guess_type
 from .exceptions import ApplicationException
@@ -39,7 +39,7 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
 
 
 def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
-                      junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> float:
+                      junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> Tuple[float, bool]:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -51,7 +51,7 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
     :param junc_size: the junction size
     :param is_phase: whether or not the library was constructed using Phase's kit
     :param is_single: the observational set has been reduced to a single read per fragment
-    :return: the observed fraction [0, 1]
+    :return: tuple of observed fraction value and overlap status
     """
 
     def make_observable_mask(read_len: int, insert_len: int, kmer_size: int,
@@ -125,7 +125,15 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
         logger.warning('Estimate for observed fraction < 0, resetting to 0.')
         obs_frac = 0
 
-    return obs_frac
+    if 1 - obs_frac < 0:
+        logger.warning('Read-pairs have significant overlap due to small fragment size')
+        severe_overlap = True
+    else:
+        logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                    .format(insert_len, 1 - obs_frac))
+        severe_overlap = False
+
+    return obs_frac, severe_overlap
 
 
 def count_sequences(file_name: str, fmt: str, max_cpu: int = 1) -> int:
