@@ -19,6 +19,9 @@ def main():
     import sys
 
     class UniqueStore(argparse.Action):
+        """
+        Restrict an argparse argument to only one occurrence
+        """
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.count = 0
@@ -28,6 +31,42 @@ def main():
                 parser.error('duplicate use of the option: {}'.format(option_string))
             setattr(namespace, self.dest, values)
             self.count += 1
+
+    class Range(object):
+        """
+        Define a range of acceptable values for argparse argument
+        """
+        def __init__(self, start, end, include_start: bool = True, include_end: bool = True):
+            self.start = start
+            self.end = end
+            self.include_start = include_start
+            self.include_end = include_end
+
+        def __eq__(self, other):
+            if not self.include_start and not self.include_end:
+                return self.start < other < self.end
+            elif not self.include_start:
+                return self.start < other <= self.end
+            elif not self.include_end:
+                return self.start <= other < self.end
+            else:
+                return self.start <= other <= self.end
+
+        def __contains__(self, item):
+            return self.__eq__(item)
+
+        def __iter__(self):
+            yield self
+
+        def __repr__(self):
+            if not self.include_start and not self.include_end:
+                return 'range ({0},{1})'.format(self.start, self.end)
+            elif not self.include_start:
+                return 'range ({0},{1}]'.format(self.start, self.end)
+            elif not self.include_end:
+                return 'range [{0},{1})'.format(self.start, self.end)
+            else:
+                return 'range [{0},{1}]'.format(self.start, self.end)
 
     """
     Shared CLI arguments
@@ -40,7 +79,8 @@ def main():
                                help='Write output files to this folder [.]')
 
     analysis_parser = argparse.ArgumentParser(add_help=False)
-    analysis_parser.add_argument('-p', '--sample-rate', default=None, type=float, action=UniqueStore,
+    analysis_parser.add_argument('-p', '--sample-rate', default=None, type=float,
+                                 choices=Range(0, 1, include_start=False), action=UniqueStore,
                                  help='Sample only a proportion of all read-pairs [None]')
     analysis_parser.add_argument('-s', '--seed', type=int, action=UniqueStore,
                                  help='Random seed used in sampling the read-set [None]')
@@ -53,9 +93,9 @@ def main():
 
     digestion_group = analysis_parser.add_mutually_exclusive_group(required=True)
     digestion_group.add_argument('-k', '--library-kit', choices=['phase', 'arima'], default=None, action=UniqueStore,
-                                 help='A commercial library kit')
+                                 help='Define digest by the commercial library kit used')
     digestion_group.add_argument('-e', '--enzyme', metavar='NEB_NAME', action='append',
-                                 help='One or two case-sensitive NEB enzyme names')
+                                 help='Define digest by explicitly naming up to two case-sensitive NEB enzyme names')
 
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
@@ -87,16 +127,21 @@ def main():
                           help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
                           help='Save the collected observations to a file')
-    cmd_kmer.add_argument('-bm', '--bootstraps', type=int, default=50, action=UniqueStore,
-                          help='Number of resampling bootstraps to estimatte CI [50]')
-    cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float, action=UniqueStore,
-                          help='Ignore regions possessing k-mer frequencies above this quantile [0.9]')
+    cmd_kmer.add_argument('--num-sample', type=int, default=50, action=UniqueStore,
+                          help='Number of samples to use in bootstrapping confidence interval [50]')
+    cmd_kmer.add_argument('--frac-sample', type=float, default=0.33,
+                          choices=Range(0, 1, include_start=False), action=UniqueStore,
+                          help='Fraction of observations to use per-bootstrap iteration [1/3]')
+    cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float,
+                          choices=Range(0, 1, include_start=False), action=UniqueStore,
+                          help='Ignore k-mers possessing frequencies above this quantile [0.9]')
     cmd_kmer.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
                           help='Mean fragment length to use in estimating the unobserved junction rate')
     cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
-                          help='FastQ format reads that were used to generate the k-mer library')
+                          help='FastQ format reads that were used to generate the k-mer library '
+                               '(use multiple times for multiple files)')
 
     """
     CLI for creating kmer database
@@ -106,7 +151,8 @@ def main():
     cmd_mkdb.add_argument('-k', '--kmer-size', default=24, type=int, action=UniqueStore,
                           help='Library kmer size [24]')
     cmd_mkdb.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
-                          help='FastQ format reads to use in generating the k-mer library')
+                          help='FastQ format reads to use in generating the k-mer library '
+                               '(use multiple times for multiple files)')
     cmd_mkdb.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
                           help='Output Jellyfish k-mer library base name')
 
@@ -159,10 +205,6 @@ def main():
         if args.threads < 1:
             parser.error('The number of threads must be greater than 1')
 
-        if hasattr(args, 'sample_rate') and \
-                args.sample_rate is not None and not (0 < args.sample_rate <= 1):
-            parser.error('Sample rate must be within the range (0,1]')
-
         report_path = os.path.join(args.output_path, __report_name__)
 
         # check if the user has employed the library kit option to declare enzymes
@@ -213,7 +255,7 @@ def main():
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,
                          threads=args.threads, output_table=table_path, report_path=report_path,
                          no_json=args.no_json, no_html=args.no_html, max_obs=args.max_obs,
-                         merged_reads=args.merged_reads, num_bootstraps=args.bootstraps)
+                         num_sample=args.num_sample, frac_sample=args.frac_sample)
 
     except ApplicationException as ex:
         logger.error(str(ex))
