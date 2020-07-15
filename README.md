@@ -1,61 +1,37 @@
-# qc3C - Quality control for Hi-C DNA sequencing libraries
+# qc3C - quality control for Hi-C DNA sequencing libraries
 
-qc3C attempts to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library. That is, read-pairs which are a true product of proximity ligation, rather than self-religation or shotgun noise. To accomplish this, two modes of analysis are available: BAM analysis and assembly-free kmer analysis. 
+The aim of qc3C is to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library and thereby judge its quality as experimental data. 
+
+We use "signal" to refer to the proportion of read-pairs which are true products of proximity ligation, rather than pairs that result from undesirable processes that in downstream analysis will constitute the noise in the experiment. 
+ 
+To accomplish this, two modes of analysis are available:
+
+- BAM mode
+
+    Conventional assessment requiring a reference sequence and read-mapping.
+
+- _K_-mer mode
+
+    **Reference-free** assessment requiring only a Hi-C read-set. 
 
 ## Installation
 
-Installing qc3C can be accomplished directly from Github using Pip or installation can be avoided by use of Docker or Singularity. One currently unavoidable complication of our Pip installation is that Jellyfish (a major dependency) must be installed separately.
+### From Conda
 
-Jellyfish is a well documented project, so if you encounter problems with its installation we encouraged you to refer it's own [Github repo](https://github.com/gmarcais/Jellyfish).
+We maintain conda packages for both qc3C and the supporting _k_-mer counting tool Jellyfish. Installation using conda is very simple.
 
-### Step 1: Install Jellyfish
+```$bash
+conda create -n qc3c -c cerebis -c bioconda -c conda-forge qc3C
+``` 
 
-**Pre-requisites for Jellyfish**
+### From Docker
 
-- GNU g++ version >= v4.4
-- Autoconf
-- Make
+A docker image is maintained and published to DockerHub
 
-
-**Steps from a working directory of your choosing**
-
-All of these steps should complete without error.
-
-```bash
-# Step 1
-wget https://github.com/gmarcais/Jellyfish/releases/download/v2.2.10/jellyfish-2.2.10.tar.gz 
-# Step 2
-tar xzf jellyfish-2.2.10.tar.gz && cd jellyfish-2.2.10
-# Step 3
-export PKG_CONFIG_PATH=$PWD:$PKG_CONFIG_PATH
-# Step 4
-./configure && sudo make install
-# Step 5
-cd swig/python
-# Step 6
-python3 setup.py build && sudo python3 setup.py install
+```$bash
+docker pull cerebis/qc3C:latest
+docker run cerebis/qc3C:latest qc3C -h
 ```
-
-**Installation comments**
-
-- Since qc3C is written exclusively for Python 3, we explicitly invoke a py3 interpreter `python3`. Be mindful of whether on your system using the simpler invocation `python` unintentionally invokes a py2 interpreter.
-- The commands above and below assume you have sudo privileges. If you do not, please adjust the installation directory of Jellyfish to where you have write access, such as your home path 
-  
-  - For the dynamic libraries and jellyfish executable: `./configure --prefix=$HOME`. 
-  - For the Python modules, this is more cumbersome to accomplish. We'd recommend that for non-root installations users either employ a Conda environment or `pip install --user` for both qc3C and Jellyfish.
-
-
-### Step 2: Install qc3C using Pip
-
-qc3C can be installed directly from Github with the following command.
-
-```bash
-pip3 install git+https://github.com/cerebis/qc3C
-```
-
-## Using Docker the image
-
-We maintain an update to date image of qc3C on Dockerhub. Both a minimal Alpine-based image and a Centos6-based image for older systems are available.
 
 The image also includes a the following tools:
 
@@ -66,69 +42,76 @@ The image also includes a the following tools:
 - spades
 - pigz
 
-First, pull the required image from Dockerhub.
-```bash
-# most systems should first try
-docker pull cerebis/qc3c:alpine
+### From Github
 
-# if when you run qc3C, you receive a "kernel too old" error try instead
-docker pull cerebis/qc3c:centos6
-```
+qc3C can be installed directly from github, however this requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, the a build which correctly creates the Python hooks is more problematic. To remedy this, users are encouraged to use our Jellyfish conda package, after which qc3C is easily installed using Pip.
 
-After successfully obtaining the image, qc3C or Jellyfish can be run as follows (_using the alpine image here_) :
-```bash
-# show qc3C help
-docker run cerebis/qc3c:alpine qc3C -h
+**Note:** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, when run qc3C will throw `NoModuleFoundError: No module named 'jellyfish'`. 
 
-# show jellyfish --help
-docker run cerebis/qc3c:alpine jellyfish
-```
-
-### Using qc3C
-
-#### Creating the mode-dependent analysis target
-
-##### A BAM file for QC analysis
-The bam analysis mode requires that Hi-C reads are first mapped to a reference, preferably the same genome as was used in producing the Hi-C library. The reference can be in the form of a closed genome or assembly contigs. We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`.
-
-To produce a query-name sorted bam of Hi-C reads mapped to a chosen reference. (_Note: we opt to filter-out certain reads which will not be used in the QC analysis._)
+The following bash snippet prepares the conda environment with our Jellyfish package and installs qc3C directly from Github.
 
 ```$bash
-bwa mem -5SP contigs.fa hic_reads.fq | samtools view -F 0x904 -bS - | samtools sort -n -o hic_to_ref.bam -
+conda create -y -n qc3c -c cerebis -c bioconda -c conda-forge jellyfish
+conda activate qc3c
+pip install git+https://github.com/cerebis/qc3C
 ```
 
-##### A k-mer library for QC analysis
-As a reference sequence is not necessary available at QC time, a second k-mer based approach is provided. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to externally generate the k-mer library and Jellyfish's Python hooks internally during analysis.
+## Using qc3C
 
-From a Hi-C read-set, a Jellyfish k-mer library of size 24 could be generated as follows:
+### Creating A BAM file for QC analysis
+
+To quality-assess a Hi-C read-set using BAM mode, users must first map the Hi-C reads to a reference sequence obtained from the same source. 
+
+We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with options `-5SP`. Here, optns `-S` and `-P` stop BWA MEM from attempting perform mate rescue and pairing, while `-5` cause the lowest-coordinate part of split alignments to be reported as primary. This last option is particularly handy for simplifying the logic in programs analysing Hi-C read-mappings (such as bin3C). Please note that for qc3C parsing, the BAM file must be sorted by query id.
+ 
+Below is an example of aligning Hi-C reads to a reference.  
 
 ```$bash
-jellyfish count -m 24 -s 2G -C -o 24mers.jf hic_reads.fq 
+bwa index ref.fa
+bwa mem -5SP ref.fna.gz hic_reads.fq.gz | samtools view -bS - | samtools sort -n -o hic_to_ref.bam -
 ```
 
-#### Running a QC analysis
+The state of the reference can range from a completed genome to assembly contigs, but users should keeo in mind that as the reference becomes more fragmented, assessing long-range _cis_-contacts will become increasingly hampered by short references on which to map reads. Further, _trans_-contocts (inter-molecular contacts) cannot be distinguished from those which merely connect broken segments from the same molecule.
 
-In either mode, qc3C searches for evidence of proximity ligations to infer whether or not a generated library contains strong signal. Used after performing a small assessment sequencing run, this information allows researchers to choose to a full sequencing run that is more or less deep, or abandon a library entirely. 
+### Creating a k-mer library for QC analysis
 
-For large data-sets, analysing the entire contents is likely unnecessary and we recommend looking at only subsample of observations using the `--sample-rate|-p` option. As little as 5% (`-p 0.05`) may be sufficient if there are millions of reads in your chosen dataset.  
+Reference-free quality assessment is also possible with qc3C and is convenient in cases where a reference is not available or users do not wish to spend the time creating the BAM file as above. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to initially generate the k-mer library from the Hi-C read-set and afterwards uses Jellyfish's Python to analyse it.
 
-Example usage for a library which used both Sau3AI and MluCI restriction enzymes
+Below is an example of creating the k-mer library from a Hi-C read-set.
 
-##### BAM mode
 ```$bash
-> qc3C bam --mean-insert 500 -enzyme Sau3AI --enzyme MluCI --bam hic_to_ref.bam
-
+qc3C mkdb -r hic_reads.fq.gz -l hic_reads.jf 
 ```
-##### Kmer mode
+
+### Running a QC analysis
+
+In either mode, qc3C searches the read-pairs for evidence of proximity ligation. This evidence is then used to infer whether or not a generated library contains a strong signal (a high fraction of proximity-ligation containing read-pairs). By employing quality analysis on less expensive, small-scale pilot sequencing runs, users are better able to decide whether larger-scale sequencing should proceed and to what depth. Given sufficient budget, experiments which produced low-signal libraries might be rescued through deeper sequencing. 
+
+Analysing the entirety of a large read-set is unnecessary to obtain reliable evidence of a read-sets overall quality. To look at only a sample of observations, users can limit the total number of observations (`--max-obs`) and/or control acceptance rate `--sample-rate`. In testing, we have found reliable results from 100,000 reads.
+
+Example usage for a Hi-C library generated with a single enzyme.
+
+#### BAM mode
+
 ```$bash
-> qc3C kmer --mean-insert 500 -enzyme Sau3AI --reads hic_reads.fq --lib 24mers.jf
+qc3C bam -enzyme DpnII --bam hic_to_ref.bam --fasta ref.fna.gz
+
 ```
 
+#### _K_-mer mode
+
+```$bash
+qc3C kmer --mean-insert 500 -enzyme DpnII --reads hic_reads.fq.gz --lib hic_reads.jf
+```
+
+**Note** it is vitally important that an accurate estimate of the insert/fragment length is known. This value should purely reflect the size of the unknown sequence. Care should be taken that this value **does not** include adapter. In testing, we have found that sequencing facilities can inadvertently quote this larger value. 
+
+If a reference is available, qc3C BAM mode will report both median and mean observed insert size, which can subsequently be used in _k_-mer mode. When available, information from both modes is of value, as _k_-mer mode estimates the fraction of proximity-ligation pairs, while apart from estimating insert size, BAM mode reports other interesting summary statistics such as the number of observed read-through events, and a breakdown of pairs (self-circle, dangling-end, etc). 
 
 ### Command line help
 
 ```$bash
-usage: qc3C [-h] [-V] {bam,kmer} ...
+usage: qc3C [-h] [-V] {bam,kmer,mkdb} ...
 
 qc3C: Hi-C quality control
 
@@ -139,61 +122,95 @@ optional arguments:
 commands:
   Valid commands
 
-  {bam,kmer}     choose an analysis stage for further options
+  {bam,kmer,mkdb}     choose an analysis stage for further options
 ```
 
+
+#### Usage for mkdb
 ```$bash
-usage: qc3C bam [-h] [-v] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
-                MEAN_INSERT [-q MIN_MAPQ] -b BAM
+usage: qc3C mkdb [-h] [-d] [-v] [-t N] [-o PATH] [-s HASH_SIZE] [-k KMER_SIZE] -r FASTQ_FILE -l KMER_LIB
+
+Create kmer database.
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -d, --debug           Enable debug output
+  -v, --verbose         Verbose output
+  -t N, --threads N     Number of threads [1]
+  -o PATH, --output-path PATH
+                        Write output files to this folder [.]
+  -s HASH_SIZE, --hash-size HASH_SIZE
+                        Initial hash size (eg. 10M, 2G) [10M]
+  -k KMER_SIZE, --kmer-size KMER_SIZE
+                        Library kmer size [24]
+  -r FASTQ_FILE, --reads FASTQ_FILE
+                        FastQ format reads to use in generating the k-mer library (use multiple times for multiple files)
+  -l KMER_LIB, --lib KMER_LIB
+                        Output Jellyfish k-mer library base name
+```
+
+#### Usage for BAM mode
+
+```$bash
+usage: qc3C bam [-h] [-d] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] 
+    [--no-html] (-k {phase,arima} | -e NEB_NAME) [-q MIN_MAPQ] -f FASTA -b BAM
 
 Alignment-based analysis.
 
 optional arguments:
   -h, --help            show this help message and exit
+  -d, --debug           Enable debug output
   -v, --verbose         Verbose output
-  -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
+  -t N, --threads N     Number of threads [1]
+  -o PATH, --output-path PATH
+                        Write output files to this folder [.]
+  -p {range (0,1]}, --sample-rate {range (0,1]}
                         Sample only a proportion of all read-pairs [None]
-  -s SEED, --seed SEED  Random seed used in sampling the read-set
-  -t N, --threads N     Number of threads
+  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
+  -M MAX_OBS, --max-obs MAX_OBS
+                        Stop after collecting this many observations
+  --no-json             Do not write a JSON report
+  --no-html             Do not write an HTML report
+  -k {phase,arima}, --library-kit {phase,arima}
+                        Define digest by the commercial library kit used
   -e NEB_NAME, --enzyme NEB_NAME
-                        One or more case-sensitive NEB enzyme names (Use
-                        multiple times for multiple files enzymes)
-  -m MEAN_INSERT, --mean-insert MEAN_INSERT
-                        Mean fragment length to use in estimating the
-                        unobserved junction rate
+                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
   -q MIN_MAPQ, --min-mapq MIN_MAPQ
                         Minimum acceptable mapping quality [60]
-  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to
-                        references
+  -f FASTA, --fasta FASTA
+                        Reference sequences
+  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to references
 ```
 
-```$bash
-usage: qc3C kmer [-h] [-v] [-p SAMPLE_RATE] [-s SEED] [-t N] -e NEB_NAME -m
-                 MEAN_INSERT [--output-table OUTPUT_TABLE] [-x MAX_COVERAGE]
-                 -l KMER_LIB -r FASTQ_FILE
+#### Usage for _K_-mer mode
 
-Kmer-based analysis.
+```$bash
+usage: qc3C bam [-h] [-d] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] 
+    [--no-html] (-k {phase,arima} | -e NEB_NAME) [-q MIN_MAPQ] -f FASTA -b BAM
+
+Alignment-based analysis.
 
 optional arguments:
   -h, --help            show this help message and exit
+  -d, --debug           Enable debug output
   -v, --verbose         Verbose output
-  -p SAMPLE_RATE, --sample-rate SAMPLE_RATE
+  -t N, --threads N     Number of threads [1]
+  -o PATH, --output-path PATH
+                        Write output files to this folder [.]
+  -p {range (0,1]}, --sample-rate {range (0,1]}
                         Sample only a proportion of all read-pairs [None]
-  -s SEED, --seed SEED  Random seed used in sampling the read-set
-  -t N, --threads N     Number of threads
+  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
+  -M MAX_OBS, --max-obs MAX_OBS
+                        Stop after collecting this many observations
+  --no-json             Do not write a JSON report
+  --no-html             Do not write an HTML report
+  -k {phase,arima}, --library-kit {phase,arima}
+                        Define digest by the commercial library kit used
   -e NEB_NAME, --enzyme NEB_NAME
-                        One or more case-sensitive NEB enzyme names (Use
-                        multiple times for multiple files enzymes)
-  -m MEAN_INSERT, --mean-insert MEAN_INSERT
-                        Mean fragment length to use in estimating the
-                        unobserved junction rate
-  --output-table OUTPUT_TABLE
-                        Save the collected per-read statistics table to a file
-  -x MAX_COVERAGE, --max-coverage MAX_COVERAGE
-                        Ignore regions with more than this coverage [500]
-  -l KMER_LIB, --lib KMER_LIB
-                        Jellyfish kmer database
-  -r FASTQ_FILE, --reads FASTQ_FILE
-                        FastQ format reads used in making the kmer database
-                        (Use multiple times for multiple files)
+                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
+  -q MIN_MAPQ, --min-mapq MIN_MAPQ
+                        Minimum acceptable mapping quality [60]
+  -f FASTA, --fasta FASTA
+                        Reference sequences
+  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to references
 ```

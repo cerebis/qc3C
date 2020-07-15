@@ -1,6 +1,12 @@
-biopython
+astropy
+biopython==1.76
+json2html
 leven
+numba
 numpy
 pandas
+psutil
 pysam
+scipy
+simplejson
 tqdm

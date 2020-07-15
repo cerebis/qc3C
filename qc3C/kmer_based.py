@@ -6,11 +6,12 @@ import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple
-from typing import TextIO, Optional, Dict
-from qc3C.exceptions import InsufficientDataException
-from qc3C.ligation import ligation_junction_seq, get_enzyme_instance
-from qc3C.utils import init_random_state, test_for_exe, write_jsonline
+from collections import namedtuple, OrderedDict
+from scipy.stats import gmean
+from typing import TextIO, Optional, Dict, List, Tuple
+from qc3C.exceptions import *
+from qc3C.ligation import Digest
+from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report, observed_fraction
 from qc3C._version import runtime_info
 
 try:
@@ -21,7 +22,77 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'read_type', 'read_pos'])
+CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'has_junc', 'read_pos', 'seq', 'read_len', 'junc_seq'])
+
+
+class Counter(object):
+    def __init__(self, **extended_fields):
+        self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0,
+                       'high_cov': 0, 'low_cov': 0, 'zero_cov': 0}
+        self.counts.update(extended_fields)
+        self.reject_keys = self.counts.keys() - {'all', 'sample'}
+
+    def __getitem__(self, item: str):
+        return self.counts[item]
+
+    def __setitem__(self, key: str, value: int):
+        assert key in self.counts, 'Key value {} was not found'.format(key)
+        self.counts[key] = value
+
+    def __iadd__(self, other):
+        if isinstance(other, Counter):
+            _counts = other.counts
+        elif isinstance(other, dict):
+            _counts = other
+        else:
+            raise RuntimeError()
+        for k, v in _counts.items():
+            self.counts[k] += v
+        return self
+
+    def update(self, _dict):
+        for k, v in _dict.items():
+            self.counts[k] = v
+
+    def analysed(self) -> int:
+        return self.counts['all'] - self.counts['sample']
+
+    def accepted(self) -> int:
+        return self.analysed() - self.rejected()
+
+    def rejected(self) -> int:
+        return sum(self.counts[k] for k in self.reject_keys)
+
+    def count(self, category: str) -> int:
+        """
+        Return the number of counts in a particular category (analysed, rejected or ...)
+        :param category: the category
+        :return: the counts of category
+        """
+        if category == 'analysed':
+            return self.analysed()
+        elif category == 'rejected':
+            return self.rejected()
+        elif category == 'accepted':
+            return self.accepted()
+        else:
+            return self.counts[category]
+
+    def fraction(self, category: str, against: str = 'analysed') -> float:
+        """
+        Return the category's fraction compared to one of (accepted, all, analysed).
+        :param category: the category (numerator)
+        :param against: the denominator
+        :return: a fraction [0,1]
+        """
+        if against == 'accepted':
+            return self.count(category) / self.accepted()
+        elif against == 'all':
+            return self.count(category) / self.counts['all']
+        elif against == 'analysed':
+            return self.count(category) / self.analysed()
+        else:
+            raise RuntimeError('parameter \"against\" must be one of [accepted, analysed or all]')
 
 
 def open_input(file_name: str) -> TextIO:
@@ -85,333 +156,295 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
                 break
 
 
-def count_fastq_sequences(file_name: str, max_cpu: int = 1) -> int:
-    """
-    Estimate the number of fasta sequences in a file by counting headers. Decompression
-    is automatically attempted for files ending in .gz. Counting and decompression is by
-    way of subprocess calls to grep and gzip. Uncompressed files are also handled. This
-    is about 8 times faster than parsing a file with BioPython and 6 times faster than
-    reading all lines in Python.
-    :param file_name: the fasta file to inspect
-    :param max_cpu: the number of cpus if pigz exists
-    :return: the estimated number of records
-    """
-    if file_name.endswith('.gz'):
-        pigz_path = test_for_exe('pigz')
-        if max_cpu > 1 and pigz_path is not None:
-            proc_uncomp = subprocess.Popen([pigz_path, '-p{}'.format(max_cpu), '-cd', file_name],
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def assign_empirical_pvalues_all(_df):
+    _cols = ['ratio', 'pvalue', 'has_junc', 'read_len', 'seq']
+
+    # get the observations which did not contain a junction
+    # these are our cases where the NULL hypothesis is true
+    # NOTE as has_junc is categorical, we must use a logical comparison
+    _no_junc = _df.loc[_df.has_junc == False, _cols].values
+    _no_junc[:, 1] = -1
+
+    # reduce this to the set of unique ratios. The returned
+    # ratios are implicitly sorted in ascending order
+    _uniq_ratios, _inv_index = np.unique(_no_junc[:, 0], return_inverse=True)
+
+    # The number of unique ratios determines the set of p-values.
+    # we use linspace sampler as means of calculating p(r,N) = (r+1)/(N+1)
+    _pvals = np.linspace(0, 1, num=_uniq_ratios.shape[0] + 2)[2:]
+
+    # reassign these pvalues using the inverse index
+    _no_junc[:, 1] = _pvals[_inv_index]
+
+    # now extract the obs which did contain the junction,
+    # we will next distribute the empirical p-values
+    _out = _df.loc[_df.has_junc, _cols].values
+    _out[:, 1] = -1
+
+    # join both tables and reorder by ascending ratio
+    _out = np.vstack([_no_junc, _out])
+    _out = _out[np.argsort(_out[:, 0]), ]
+
+    # distribute the smallest non-zero adjacent pvalue to those which are zero
+    last_pval = _pvals[0]
+    for i in range(0, _out.shape[0]):
+        if _out[i, 1] < 0:
+            _out[i, 1] = last_pval
         else:
-            proc_uncomp = subprocess.Popen(['gzip', '-cd', file_name],
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc_read = subprocess.Popen(['grep', r'^@'], stdin=proc_uncomp.stdout, stdout=subprocess.PIPE)
-    else:
-        proc_read = subprocess.Popen(['grep', r'^@', file_name], stdout=subprocess.PIPE)
+            last_pval = _out[i, 1]
 
-    n = 0
-    for _ in proc_read.stdout:
-        n += 1
-    return n
-
-
-def assign_empirical_pvalues_all(df):
-    """
-    For a combined wgs/hic dataframe, assign a ranked p-value on ascending ratio using
-    only the wgs observations. Afterwards, distribute these to hic based on their
-    order in the ascending table.
-
-    :param df: the dataframe to assign pvalues
-    :return: a new 3-column dataframe ready for pvalue distribution
-    """
-    # ascending ratio order
-    df = df.sort_values('ratio')
-    # extract just the relevant columns as a numpy array
-    _cols = ('read_type', 'ratio', 'pvalue')
-    wgs_obs = df.loc[df.read_type=='wgs', _cols].to_numpy()
-    # assign p-values overall, only incrementing when the ratio changes
-    n, N = 1, wgs_obs.shape[0]
-    last_ratio = wgs_obs[0, 1]
-    wgs_obs[0, 2] = n/N
-    for i in range(1, N):
-        if wgs_obs[i, 1] != last_ratio:
-            n += 1
-        last_ratio = wgs_obs[i, 1]
-        wgs_obs[i, 2] = n/N
-    # reconstruct a dataframe for convenience, stacking the wgs and hic obs together
-    df = pandas.DataFrame(np.vstack([wgs_obs, df.loc[df.read_type=='hic', _cols].to_numpy()]),
-                          columns=['read_type', 'ratio', 'pvalue'])
-    # resort as the hic obs need to be reintegrated at their proper location
-    df.sort_values('ratio', inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return distribute_pvalues(df)
-
-
-def assign_empirical_pvalues_uniq(df: pandas.DataFrame) -> pandas.DataFrame:
-    """
-    Taking in a mixed DataFrame containing both wgs and hic observations, assign empirical
-    p-values to the wgs observations. Duplicate ratio values are dropped for both WGS and Hi-C
-    observations (separately). Consequently, the returned DataFrame contains only these unique rows.
-    :param df: a combined DataFrame of both Hi-C and WGS observations
-    :return: a DataFrame with only read_type, ratio and pvalue columns
-    """
-    # columns to use and return
-    _cols = ('read_type', 'ratio', 'pvalue')
-    # extract the WGS obs, remove duplicates and sort
-    wgs_uniq = df.loc[df.read_type == 'wgs', _cols].drop_duplicates('ratio').sort_values('ratio')
-    # get the underlying numpy array
-    arr = wgs_uniq.to_numpy()
-    # impose linear spacing of p-value bins
-    pval_bin = 1 / arr.shape[0]
-    # distribute linearly increasing p-values across the sorted WGS observations
-    arr[:, 2] = np.arange(1, arr.shape[0]+1) * pval_bin
-    # extract the Hi-C obs and remove dupes
-    hic_uniq = df.loc[df.read_type == 'hic', _cols].drop_duplicates('ratio')
-    hic_uniq.pvalue = None
-    # recombine the WGS and Hi-C observations as a DataFrame, sort and reindex.
-    return pandas.DataFrame(arr, columns=_cols).append(hic_uniq).sort_values('ratio').reset_index(drop=True)
-
-
-def distribute_pvalues(df: pandas.DataFrame) -> pandas.DataFrame:
-    """
-    Traverse the table of observations by ascending ratio. When encountering a Hi-C
-    observation (which should be unassigned) assign the last p-value seen from the
-    WGS observations.
-    :param df: the DataFrame of WGS and Hi-C observations, sorted by ascending ratio
-    :return: a DataFrame with p-values assigned to Hi-C observations
-    """
-    # get underlying numpy array and column indices
-    arr = df.to_numpy()
-    ix_pval = df.columns.get_loc('pvalue')
-    ix_rt = df.columns.get_loc('read_type')
-    # the most recent p-value
-    current_p = arr[0, ix_pval]
-    for i in range(arr.shape[0]):
-        # update p-value
-        if arr[i, ix_rt] == 'wgs':
-            current_p = arr[i, ix_pval]
-        # distribute current p-value to hi-c obs
-        elif arr[i, ix_rt] == 'hic':
-            arr[i, ix_pval] = current_p
-        else:
-            raise RuntimeError('unknown read type {}'.format(arr[i, ix_rt]))
-    return pandas.DataFrame(arr, columns=df.columns)
+    # remake the full table
+    return pandas.DataFrame(_out, columns=_cols)
 
 
 def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
     """
-    Calculate the mean p-value and variation for Hi-C observations. WGS observations
+    Calculate the mean p-value and variation for Hi-C observations. Junctionless observations
     are assigned a p-value of 0.
-    :param df: the dataframe to analyze
+    :param df: the dataframe to analyse
     :return: a tuple of p-value mean and error
     """
     # number of total observations
-    N = len(df)
+    # n_obs = len(df)
     # Hi-C q = 1 - p-value
-    q = 1 - df.loc[df.read_type == 'hic', 'pvalue'].to_numpy(np.float)
+    q = 1 - df.loc[df.has_junc, 'pvalue'].to_numpy(np.float)
 
     # mean value and error
-    _mean = q.sum() / N
-    _err = np.sqrt((q * (1-q)).sum()) / N
+    n_frag_obs = len(set(df.seq))
+    _mean = q.sum() / n_frag_obs
+    _err = np.sqrt((q * (1-q)).sum()) / n_frag_obs
 
     return {'mean': _mean, 'error': _err}
 
 
-def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, max_coverage: int = 500, threads: int = 1,
-            output_table: str = None, report_path: str = None, num_obs: int = None) -> None:
+def get_kmer_size(filename: str) -> int:
     """
-    Using a read-set and its associated Jellyfish kmer database, analyze the reads for evidence
+    Retrieve the k-mer size used in a library by reading the first record.
+    This assumes all mers within the library have the same k-mer size.
+    :param filename:
+    :return: the size of the k-mer used in a Jellyfish library
+    """
+    iter_mer = dna_jellyfish.ReadMerFile(filename)
+    current_mer = iter_mer.mer()
+    k_size = current_mer.k()
+    del iter_mer
+    return k_size
+
+
+def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -> int:
+    """
+    Get a cutoff value for high frequency kmers by calling out to Jellyfish.
+    The external call produces a histogram of kmer frequency, from which Pandas is used to
+    calculate a quantile cut-off.
+
+    :param filename: A jellyfish k-mer database
+    :param q: the threshold quantile
+    :param threads: number of concurrent threads to use
+    :return: maximum frequency cut-off
+    """
+    proc = subprocess.Popen(['jellyfish', 'histo', '-t{}'.format(threads), filename],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        max_cov = pandas.read_csv(proc.stdout, sep=' ', names=['cov', 'count'])['cov'].quantile(q=q)
+        return round(float(max_cov))
+    except Exception as e:
+        raise RuntimeError('Encountered a problem while analyzing kmer distribution. [{}]'.format(e))
+
+
+def next_read(filename: str, searcher, longest_site: int, k_size: int,
+              prob_accept: float, progress, counts: Counter,
+              tracker: Dict[Digest.DerivedString, int], no_user_limit: bool,
+              random_state: np.random.RandomState) -> Tuple[str,
+                                                            Optional[int],
+                                                            str,
+                                                            int,
+                                                            Optional[int],
+                                                            Optional[str]]:
+    """
+    Create a generator function which returns sequence data site positions
+    from a FastQ file.
+    :param filename: the fastq file, compressed or not
+    :param searcher: regex search method for matching any enzyme
+    :param longest_site: the length of the longest cutsite used in digestion
+    :param k_size: the k-mer size used in the counting database
+    :param prob_accept: probability threshold used to subsample the full read-set
+    :param progress: progress bar for user feedback
+    :param counts: a tracker class for various rejection conditions
+    :param tracker: a tracker for junction kmer types
+    :param no_user_limit: a user limit has not been set
+    :param random_state: random state for subsampling
+    :return: yield tuple of (sequence, site position, read id, seq length, junc length, junc seq)
+    """
+    reader = read_seq(open_input(filename))
+    unif = random_state.uniform
+
+    for _id, _seq, _qual in reader:
+
+        counts['all'] += 1
+        if no_user_limit:
+            # no limit has been set, track all progress
+            progress.update()
+
+        # subsampling read-set
+        if prob_accept is not None and prob_accept < unif():
+            counts['sample'] += 1
+            continue
+
+        # skip sequences which are too short to analyse
+        seq_len = len(_seq)
+        if seq_len < 2 * k_size + longest_site + 2:
+            counts['short'] += 1
+            continue
+
+        # search for the site
+        _seq = _seq.upper()
+
+        # TODO this (and previous approach) only matches the first instance of the site within the read.
+        #  There is no reason that this would be the correct location.
+        _match = searcher(_seq)
+        # no site found
+        if _match is None:
+            yield _seq, None, _id, seq_len, None, None
+        else:
+            _ix, _end = _match.span()
+            _junc_len = _end - _ix
+            _junc_seq = _match.group()
+            tracker[_junc_seq] += 1
+            # only report sites which meet flank constraints
+            # elif k_size <= _ix <= (seq_len - (k_size + site_size)):
+            if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
+                yield _seq, _ix, _id, seq_len, _junc_len, _junc_seq
+            else:
+                counts['flank'] += 1
+
+
+def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
+            sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
+            output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
+            num_sample: int = 50, frac_sample: float = 1 / 3) -> None:
+    """
+    Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
-        
-    :param enzyme: the enzyme used during digestion
-    :param kmer_db: the jellyfish kmer database
-    :param read_list: the list of read files in FastQ format.
+
+    :param enzyme_names: the enzymes used during digestion (max 2)
+    :param kmer_db: the jellyfish k-mer database
+    :param read_files: the list of read files in FastQ format.
     :param mean_insert: mean length of inserts used in creating the library
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
-    :param max_coverage: ignore kmers with coverage greater than this value
+    :param max_freq_quantile: ignore k-mers with k-mer frequencies above this quantile
     :param threads: use additional threads for supported steps
+    :param max_obs: the maximum number of reads to inspect
     :param output_table: if not None, write the full pandas table to the specified path
     :param report_path: append a report in single-line JSON format to the given path.
-    :param num_obs: the number of observations to collect before rendering report
+    :param no_json: disable json report
+    :param no_html: disable html report
+    :param num_sample: the number of bootstrap samples to use
+    :param frac_sample: the fraction of observations to use per-bootstrap
     """
 
-    def collect_coverage(seq: str, ix: int, site_size: int, k: int, min_cov: int = 0) -> (float, float):
+    def extract_sample(_df: pandas.DataFrame, _frac: float, _min_n: int, _max_n: int,
+                       _rs: np.random.RandomState) -> pandas.DataFrame:
+        """
+        Extract a sample from a larger table, where random selection is upon fragment id. This
+        maintains pairs across the sampling process.
+        :param _df: the larger dataframe to select from
+        :param _frac: the desired fraction of obs to take in a sample
+        :param _min_n: minimum number of obs to take in a sample
+        :param _max_n: maximum number of obs to take in a sample
+        :param _rs: a numpy random state
+        :return: the sampled dataframe
+        """
+        n_sample = int(len(_df) * _frac)
+        if n_sample < _min_n:
+            logger.debug('Observation pool is small, limiting sample size to {}'.format(_min_n))
+            n_sample = _min_n
+        if n_sample > _max_n:
+            logger.debug('Observation pool is large, limiting sample size to {}'.format(_max_n))
+            n_sample = _max_n
+
+        ix = np.unique(_rs.choice(_df.seq, size=n_sample))
+        return _df.set_index('seq').loc[ix].reset_index()
+
+    def collect_coverage(seq: str, ix: int, site_size: int, k: int) -> (float, float):
         """
         Collect the k-mer coverage centered around the position ix. From the left, the sliding
         window begins just before the site region and slides right until just after. Means
         are then calculated for the inner (within the junction) and outer (left and right flanks)
-        :param seq: the sequence to analyze
+        :param seq: the sequence to analyse
         :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
         :param site_size: the size of the junction site
         :param k: the kmer size
-        :param min_cov: apply a minimum value to coverage reported by jellyfish.
         :return: mean(inner), mean(outer)
         """
-        assert k <= ix <= len(seq) - (k + site_size), \
-            'The site index {} is either too close to start (min {}) or ' \
-            'end (max {}) of read to scan for coverage'.format(ix, k, len(seq) - (k + site_size))
-
-        sliding_cov = np.zeros(shape=k+site_size+1, dtype=np.int)
-        for i in range(-k, site_size+1):
-            smer = seq[ix+i:ix+i+k]
-            mer = dna_jellyfish.MerDNA(smer)
+        def get_kmer_cov(mer: str) -> float:
+            mer = dna_jellyfish.MerDNA(mer)
             mer.canonicalize()
             k_cov = query_jf[mer]
-            if k_cov < min_cov:
-                k_cov = min_cov
-            sliding_cov[i] = k_cov
-        return np.mean(sliding_cov[INNER_IX]), np.mean(sliding_cov[OUTER_IX])
+            return k_cov
 
-    class Counter(object):
-        def __init__(self, **extended_fields):
-            self.counts = {'all': 0, 'sample': 0, 'short': 0, 'flank': 0, 'ambig': 0, 'high_cov': 0}
-            self.counts.update(extended_fields)
+        outer = np.empty(shape=6, dtype=np.int)
+        inner = np.empty(shape=3, dtype=np.int)
+        r_shift = 0
+        l_flank = r_flank = (k - site_size) // 2
+        if (k - site_size) % 2 != 0:
+            l_flank += 1
+            r_shift = 1
 
-        def __getitem__(self, item: str):
-            return self.counts[item]
+        assert ix - k > 0, 'smallest valid index is: {}'.format(k+1)
+        assert ix + site_size + r_shift + k - 1 < len(seq), \
+            'largest valid index is: {}'.format(len(seq) - site_size - k - r_shift)
 
-        def __setitem__(self, key: str, value: int):
-            assert key in self.counts, 'Key value {} was not found'.format(key)
-            self.counts[key] = value
+        for i in range(-1, 2):
+            si = seq[ix - k + i: ix + i]
+            outer[i+1] = get_kmer_cov(si)
+            si = seq[ix + site_size + r_shift + i: ix + site_size + k + r_shift + i]
+            outer[i+4] = get_kmer_cov(si)
+            si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
+            inner[i+1] = get_kmer_cov(si)
+            if outer[i+1] == 0 or outer[i+4] == 0 or inner[i+1] == 0:
+                # print("OL", si, outer[i+1], seq)
+                # print("OR", si, outer[i+4], seq)
+                # print("IN", si, inner[i+1], seq)
+                raise ZeroCoverageException()
 
-        def __iadd__(self, other):
-            if isinstance(other, Counter):
-                _counts = other.counts
-            elif isinstance(other, dict):
-                _counts = other
-            else:
-                raise RuntimeError()
-            for k, v in _counts.items():
-                self.counts[k] += v
-            return self
+        cov_inner, cov_outer = gmean(inner), gmean(outer)
+        if cov_outer < 1:
+            raise LowCoverageException()
+        return cov_inner, cov_outer
 
-        def update(self, _dict):
-            for k, v in _dict.items():
-                self.counts[k] = v
+    def set_progress_description():
+        """ Convenience method for setting tqdm progress bar description """
+        if len(read_files) > 1:
+            progress.set_description('Progress (file {})'.format(n))
+        else:
+            progress.set_description('Progress')
 
-        def analyzed(self) -> int:
-            return self.counts['all'] - self.counts['sample']
+    assert mean_insert > 0, 'Mean insert length must be greater than zero'
+    if mean_insert < 100:
+        logging.warning('Mean insert length of {}bp is quite short'.format(mean_insert))
 
-        def accepted(self) -> int:
-            return self.analyzed() - self.rejected()
+    assert 0 < len(enzyme_names) <= 2, 'only 1 or 2 enzymes can be specified'
+    digest = Digest(*enzyme_names, no_ambig=False)
+    longest_site = digest.longest_junction()
 
-        def rejected(self) -> int:
-            return self.counts['short'] + self.counts['flank'] + self.counts['ambig'] + self.counts['high_cov']
-
-        def count(self, category: str) -> int:
-            """
-            Return the number of counts in a particular category (analyzed, rejected or ...)
-            :param category: the category
-            :return: the counts of category
-            """
-            if category == 'analyzed':
-                return self.analyzed()
-            elif category == 'rejected':
-                return self.rejected()
-            elif category == 'accepted':
-                return self.accepted()
-            else:
-                return self.counts[category]
-
-        def fraction(self, category: str, against: str = 'analyzed') -> float:
-            """
-            Return the category's fraction compared to one of (accepted, all, analyzed).
-            :param category: the category (numerator)
-            :param against: the denominator
-            :return: a fraction [0,1]
-            """
-            if against == 'accepted':
-                return self.count(category) / self.accepted()
-            elif against == 'all':
-                return self.count(category) / self.counts['all']
-            elif against == 'analyzed':
-                return self.count(category) / self.analyzed()
-            else:
-                raise RuntimeError('parameter \"against\" must be one of [accepted, analyzed or all]')
-
-    def next_read(filename: str, site: str, k_size: int,
-                  prob_accept: float, progress, counts: Counter) -> (str, Optional[int], str, int):
-        """
-        Create a generator function which returns sequence data site positions
-        from a FastQ file.
-        :param filename: the fastq file, compressed or not
-        :param site: the target site to find in reads, eg GATCGATC
-        :param k_size: the k-mer size used in the counting database
-        :param prob_accept: probability threshold used to subsample the full read-set
-        :param progress: progress bar for user feedback
-        :param counts: a tracker class for various rejection conditions
-        :return: yield tuple of (sequence, site_position, read_id, sequence length)
-        """
-        reader = read_seq(open_input(filename))
-        site_size = len(site)
-
-        _all = 0
-        _flank = 0
-        _sample = 0
-        _short = 0
-        for _id, _seq, _qual in reader:
-
-            _all += 1
-            progress.update()
-
-            # subsampling read-set
-            if prob_accept is not None and prob_accept < unif():
-                _sample += 1
-                continue
-
-            # skip sequences which are too short to analyze
-            seq_len = len(_seq)
-            if seq_len < 2 * k_size + site_size + 1:
-                _short += 1
-                continue
-
-            # search for the site
-            _seq = _seq.upper()
-            _ix = _seq.find(site)
-            # no site found
-            if _ix == -1:
-                yield _seq, None, _id, seq_len
-            # only report sites which meet flank constraints
-            elif k_size <= _ix <= (seq_len - (k_size + site_size)):
-                yield _seq, _ix, _id, seq_len
-            else:
-                _flank += 1
-
-        counts.update({'all': _all, 'sample': _sample, 'short': _short, 'flank': _flank})
-
-    def get_kmer_size(filename: str) -> int:
-        """
-        Retrieve the k-mer size used in a library by reading the first record.
-        This assumes all mers within the library have the same k-mer size.
-        :param filename:
-        :return: the size of the k-mer used in a Jellyfish library
-        """
-        iter_mer = dna_jellyfish.ReadMerFile(filename)
-        current_mer = iter_mer.mer()
-        k_size = current_mer.k()
-        del iter_mer
-        return k_size
-
-    # Determine the junction, treat as uppercase
-    lig_info = ligation_junction_seq(get_enzyme_instance(enzyme))
-    junc_site = lig_info.junction
-    junc_size = lig_info.junc_len
-    cut_site = lig_info.cut_site
-
-    # TODO for flexible flanks could be handled if L/R flanks treated independently
     k_size = get_kmer_size(kmer_db)
-    flank_size = (k_size - junc_size) // 2
 
     logger.info('Found a k-mer size of {}nt for the Jellyfish library at {}'.format(k_size, kmer_db))
-    logger.info('The enzyme {} with cut-site {} produces an {}nt ligation junction sequence of {}'
-                .format(lig_info.enzyme_name, lig_info.elucidation, lig_info.junc_len, lig_info.junction))
-    logger.info('For this k-mer size and enzyme, the flanks are {}nt'.format(flank_size))
-    logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'.format(k_size + 2*flank_size))
 
-    # some sanity checks.
-    assert k_size > junc_size, 'Kmer size must be larger the the junction size'
-    assert (k_size - junc_size) % 2 == 0, 'Kmer size and junction size should match (even/even) or (odd/odd)'
+    max_coverage = get_kmer_frequency_cutoff(kmer_db, max_freq_quantile, threads)
+    logger.info('Maximum k-mer frequency of {} at quantile {} in Jellyfish library {}'
+                .format(max_coverage, max_freq_quantile, kmer_db))
+
+    for li in digest.junctions.values():
+        # some sanity checks.
+        assert k_size > li.junc_len, 'k-mer size must be larger than any junction size'
+        # assert (k_size - li.junc_len) % 2 == 0, 'k-mer size and junction sizes should match (even/even) or (odd/odd)'
+
+        logger.info('The enzymatic combination {}/{} produces the {}nt ligation junction {}'
+                    .format(li.enz5p, li.enz3p, li.junc_len, li.junction))
+        logger.info('Minimum usable read length for this k-mer size and enzyme is {}nt'
+                    .format(li.junc_len + 2 * k_size + 2))
 
     # for efficiency, disable sampling if rate is 1
     if sample_rate == 1:
@@ -422,18 +455,6 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
     dna_jellyfish.MerDNA_k(k_size)
     query_jf = dna_jellyfish.QueryMerFile(kmer_db)
 
-    OUTER_IX = np.array([True] * (flank_size+2) +
-                        [False] * (junc_size*2 + 1 - 4) +
-                        [True] * (flank_size+2), dtype=np.bool)
-    INNER_IX = ~ OUTER_IX
-
-    # either count the reads or use the information provided by the user.
-    n_reads = 0
-    for reads in read_list:
-        logger.info('Counting reads in {}'.format(reads))
-        n_reads += count_fastq_sequences(reads, max_cpu=threads)
-    logger.info('Found {:,} reads to analyse'.format(n_reads))
-
     # probability of acceptance for subsampling
     if sample_rate is None or sample_rate == 1:
         logger.info('Accepting all usable reads')
@@ -443,7 +464,6 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
     # set up random number generation
     random_state = init_random_state(seed)
-    unif = random_state.uniform
     randint = random_state.randint
 
     starts_with_cutsite = 0
@@ -451,219 +471,337 @@ def analyze(enzyme: str, kmer_db: str, read_list: list, mean_insert: int, seed: 
 
     logger.info('Beginning analysis...')
 
-    if len(read_list) > 1:
-        initial_desc = 'Progress (file 1)'
+    # count the available reads if not max_obs not set
+    if max_obs is not None:
+        user_limited = True
+        logger.info('Sampling a maximum of {} observations'.format(max_obs))
+        sampled_obs = np.linspace(0, max_obs, len(read_files) + 1, dtype=np.int)
+        if len(read_files) > 1:
+            logger.debug('Sampling observations equally from each of the {} read files'.format(len(read_files)))
+        # prepare the progress bar
+        progress = tqdm.tqdm(total=max_obs)
     else:
-        initial_desc = 'Progress'
+        user_limited = False
+        sampled_obs = None
+        n_reads = 0
+        for reads in read_files:
+            logger.info('Counting reads in {}'.format(reads))
+            n_reads += count_sequences(reads, 'fastq', max_cpu=threads)
+        logger.info('Found {:,} reads to analyse'.format(n_reads))
+        # prepare the progress bar
+        progress = tqdm.tqdm(total=n_reads)
 
-    with tqdm.tqdm(desc=initial_desc, total=n_reads) as progress:
+    analysis_counter = Counter()
+    coverage_obs = []
 
-        analysis_counter = Counter()
+    any_site_match = digest.cutsite_searcher('startswith')
+    junction_tracker = digest.tracker('junction')
 
-        cov_obs = []
-        for n, reads in enumerate(read_list, 1):
+    try:
 
-            if n > 1:
-                progress.set_description('Progress (file {})'.format(n))
+        for n, reads in enumerate(read_files, 1):
 
-            read_counter = Counter()
+            set_progress_description()
 
             # set up the generator over FastQ reads, with sub-sampling
-            fq_reader = next_read(reads, junc_site, k_size, sample_rate, progress, read_counter)
+            fq_reader = next_read(reads, digest.junction_searcher('find'), longest_site, k_size,
+                                  sample_rate, progress, analysis_counter,
+                                  junction_tracker, not user_limited, random_state)
 
             while True:
 
                 try:
-                    seq, ix, _id, seq_len = next(fq_reader)
+                    seq, ix, _id, seq_len, junc_len, junc_seq = next(fq_reader)
                 except StopIteration:
                     break
 
-                if seq.startswith(cut_site):
+                if any_site_match(seq) is not None:
                     starts_with_cutsite += 1
 
                 # if the read contains no junction, we might still use it
-                # as an example of a shotgun read (wgs)
+                # as an example of a shotgun read (no_junc)
                 if ix is None:
 
-                    rtype = 'wgs'
+                    has_junc = False
+
+                    # assume longest junction for these cases
+                    junc_len = longest_site
 
                     # try to find a randomly selected region which does not contain
                     # ambiguous bases. Skip the read if we fail in a few attempts
                     _attempts = 0
                     while _attempts < 3:
-                        ix = randint(k_size, seq_len - (k_size + junc_size)+1)
+                        ix = randint(k_size + 1, seq_len - (k_size + longest_site))
                         # if no N within the subsequence, then accept it
-                        if 'N' not in seq[ix - k_size: ix + k_size + junc_size]:
+                        if 'N' not in seq[ix - k_size: ix + k_size + longest_site + 1]:
                             break
                         # otherwise keep trying
                         _attempts += 1
 
                     # too many tries occurred, abandon this sequence
                     if _attempts >= 3:
-                        read_counter.counts['ambig'] += 1
+                        analysis_counter.counts['ambig'] += 1
                         continue
 
-                # junction containing reads, categorised as hic for simplicity
+                # junction containing reads, categorised as junc for simplicity
                 else:
 
-                    rtype = 'hic'
+                    has_junc = True
 
                     # abandon this sequence if it contains an N
-                    if 'N' in seq[ix - k_size: ix + k_size + junc_size]:
-                        read_counter.counts['ambig'] += 1
+                    if 'N' in seq[ix - k_size: ix + k_size + junc_len + 1]:
+                        analysis_counter.counts['ambig'] += 1
                         continue
 
-                mean_inner, mean_outer = collect_coverage(seq, ix, junc_size, k_size, min_cov=1)
+                try:
+                    mean_inner, mean_outer = collect_coverage(seq, ix, junc_len, k_size)
+                except ZeroCoverageException:
+                    analysis_counter.counts['zero_cov'] += 1
+                    continue
+                except LowCoverageException:
+                    analysis_counter.counts['low_cov'] += 1
+                    continue
 
                 # avoid regions with pathologically high coverage
-                if mean_outer > max_coverage:
-                    read_counter.counts['high_cov'] += 1
+                if mean_inner > max_coverage or mean_outer > max_coverage:
+                    analysis_counter.counts['high_cov'] += 1
                     continue
+
+                if user_limited:
+                    # user limited runs get progress updates here rather than
+                    # within the read iterator
+                    progress.update()
 
                 cumulative_length += seq_len
 
                 # record this observation
-                cov_obs.append(CovInfo(mean_inner, mean_outer, rtype, ix))
+                coverage_obs.append(CovInfo(mean_inner, mean_outer, has_junc, ix, _id, seq_len, junc_seq))
 
-            if read_counter.fraction('rejected') > 0.9:
-                logger.warning('More than 90% of reads were rejected in the file {}'.format(reads))
+                if max_obs is not None and analysis_counter.accepted() >= sampled_obs[n]:
+                    break
 
-            analysis_counter += read_counter
+            if max_obs is not None and analysis_counter.accepted() >= max_obs:
+                raise MaxObsLimit
+
+    except MaxObsLimit:
+        pass
+    finally:
+        if progress is not None:
+            progress.close()
+            progress = None
+
+    if max_obs is not None:
+        if analysis_counter.count('accepted') >= max_obs:
+            logger.info('Reached requested observation limit [{}]'.format(max_obs))
+        else:
+            logger.warning('Failed to collect requested number of observations [{}]'.format(max_obs))
+
+    if analysis_counter.fraction('rejected') > 0.9:
+        logger.warning('More than 90% of reads were rejected')
 
     #
     # Reporting
     #
-    report = {
+    report = OrderedDict({
+        'mode': 'kmer',
         'runtime_info': runtime_info(),
-        'input_args': {'kmer_db': kmer_db, 'read_list': read_list, 'seed': seed,
-                       'sample_rate': sample_rate, 'max_coverage': max_coverage},
-        'n_parsed': analysis_counter.counts['all'],
-        'n_analyzed': analysis_counter.analyzed(),
-        'n_short': analysis_counter.count('short'),
-        'n_noflank': analysis_counter.count('flank'),
+        'input_args': {'kmer_db': kmer_db,
+                       'kmer_size': k_size,
+                       'read_list': read_files,
+                       'enzymes': enzyme_names,
+                       'seed': seed,
+                       'sample_rate': sample_rate,
+                       'max_coverage': max_coverage,
+                       'mean_insert': mean_insert,
+                       'max_freq_quantile': max_freq_quantile,
+                       'max_obs': max_obs,
+                       'num_sample': num_sample,
+                       'frac_sample': frac_sample
+                       },
+        'n_parsed_reads': analysis_counter.counts['all'],
+        'n_analysed_reads': analysis_counter.analysed(),
+        'n_too_short': analysis_counter.count('short'),
+        'n_no_flank': analysis_counter.count('flank'),
         'n_ambiguous': analysis_counter.count('ambig'),
-        'n_highcov': analysis_counter.count('high_cov'),
-    }
+        'n_high_cov': analysis_counter.count('high_cov'),
+        'n_low_cov': analysis_counter.count('low_cov'),
+        'n_zero_cov': analysis_counter.count('zero_cov'),
+    })
 
     logger.info('Number of parsed reads: {:,}'
                 .format(analysis_counter.counts['all']))
-    logger.info('Number of analyzed reads: {:,} ({:#.4g}% of parsed)'
-                .format(analysis_counter.analyzed(),
-                        analysis_counter.fraction('analyzed', 'all') * 100))
-    logger.info('Number of reads filtered [too short]: {:,} ({:#.4g}% of analyzed)'
+    logger.info('Number of analysed reads: {:,} ({:#.4g}% of parsed)'
+                .format(analysis_counter.analysed(),
+                        analysis_counter.fraction('analysed', 'all') * 100))
+    logger.info('Number of reads filtered [too short]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('short'),
                         analysis_counter.fraction('short') * 100))
-    logger.info('Number of reads filtered [insufficient flanks]: {:,} ({:#.4g}% of analyzed)'
+    logger.info('Number of reads filtered [insufficient flanks]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('flank'),
                         analysis_counter.fraction('flank') * 100))
-    logger.info('Number of reads filtered [ambiguous sequence]: {:,} ({:#.4g}% of analyzed)'
+    logger.info('Number of reads filtered [ambiguous sequence]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('ambig'),
                         analysis_counter.fraction('ambig') * 100))
-    logger.info('Number of reads filtered [high coverage]: {:,} ({:#.4g}% of analyzed)'
+    logger.info('Number of reads filtered [high coverage]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('high_cov'),
                         analysis_counter.fraction('high_cov') * 100))
+    logger.info('Number of reads filtered [low coverage]: {:,} ({:#.4g}% of analysed)'
+                .format(analysis_counter.count('low_cov'),
+                        analysis_counter.fraction('low_cov') * 100))
+
+    # this might not be needed generally.
+    if analysis_counter.count('zero_cov') > 0:
+        logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
+        logger.warning('There were {:,} ({:#.4g}% of analyzed) reads filtered due to no k-mer coverage.'
+                       .format(analysis_counter.count('zero_cov'),
+                               analysis_counter.fraction('zero_cov') * 100))
+        logger.warning('This suggests the k-mer library was not created from the supplied read-set.')
+        logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
 
     try:
         # handle event that no reads passed through parsing.
         if analysis_counter.accepted() == 0:
             raise InsufficientDataException('No reads were accepted during parsing.')
 
-        report['n_accepted'] = analysis_counter.accepted()
-        logger.info('Number of accepted reads: {:,} ({:#.4g}% of analyzed)'
+        report['n_accepted_reads'] = analysis_counter.accepted()
+        logger.info('Number of accepted reads: {:,} ({:#.4g}% of analysed)'
                     .format(analysis_counter.accepted(),
                             analysis_counter.fraction('accepted') * 100))
 
         # lets do some tabular munging, making sure that our categories are explicit
-        all_df = pandas.DataFrame(cov_obs)
-        # make read_type categorical so we will always see values for both when counting
-        all_df.read_type = pandas.Categorical(all_df.read_type, ['hic', 'wgs'], ordered=False)
+        all_df = pandas.DataFrame(coverage_obs)
+        # make the boolean explicitly categorical so that a count of zero can be returned below
+        all_df['has_junc'] = pandas.Categorical(all_df.has_junc, categories=[True, False])
 
         # remove any row which had zero coverage in inner or outer region
         z_inner = all_df.mean_inner == 0
         z_outer = all_df.mean_outer == 0
         nz_either = ~(z_inner | z_outer)
         all_df = all_df[nz_either]
-        logger.info('Rows removed with no coverage: inner {:,}, outer {:,}, shared {:,}'.format(
+        logger.debug('Rows removed due to zero coverage: inner {:,}, outer {:,}, shared {:,}'.format(
             sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
-        # check that we have some of by read types
-        count_rtype = all_df.groupby('read_type').size()
-        report['all'] = {'nojunc': count_rtype.wgs, 'hasjunc': count_rtype.hic}
-        logger.info('Break down of accepted reads: wgs {:,} junction {:,}'.format(count_rtype.wgs, count_rtype.hic))
-        if count_rtype.wgs == 0:
-            raise InsufficientDataException('No reads classified as wgs were observed.')
-        if count_rtype.hic == 0:
-            raise InsufficientDataException('No reads containing junctions were observed.')
+        # inspect the tally of observations with/without junctions
+        n_with_junc, n_without_junc = all_df.groupby('has_junc').size().sort_values(ascending=True)
+        report['n_without_junc'] = n_without_junc
+        report['n_with_junc'] = n_with_junc
+        logger.info('Break down of accepted reads: without junction {:,} with junction {:,}'
+                    .format(n_without_junc, n_with_junc))
+        if n_without_junc == 0:
+            raise InsufficientDataException('No reads without the junction sequence were observed.')
+        if n_with_junc == 0:
+            raise InsufficientDataException('No reads containing the junction sequence were observed.')
+
+        mean_read_len = cumulative_length / analysis_counter.count('accepted')
+        report['mean_readlen'] = mean_read_len
+        logger.info('Observed mean read length: {:.0f}nt'.format(mean_read_len))
 
         # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
         all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
-        all_df['pvalue'] = 0
+        all_df['pvalue'] = None
 
         report['cs_start'] = starts_with_cutsite
         logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
                     .format(starts_with_cutsite,
                             starts_with_cutsite / analysis_counter.count('accepted') * 100))
+
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                    .format(1 / 4 ** lig_info.site_len * 100))
-        logger.info('Number of accepted reads containing the junction sequence: {:,} ({:#.4g}% of accepted)'
-                    .format(count_rtype.hic,
-                            count_rtype.hic / analysis_counter.count('accepted') * 100))
+                    .format(sum(1 / 4 ** ci.site_len for ci in digest.cutsites.values()) * 100))
+        logger.info('Number of accepted reads containing potential junctions: {:,} ({:#.4g}% of accepted)'
+                    .format(n_with_junc,
+                            n_with_junc / analysis_counter.count('accepted') * 100))
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
-                    .format(1 / 4 ** lig_info.junc_len * 100))
+                    .format(sum(1 / 4 ** li.junc_len for li in digest.junctions.values()) * 100))
 
-        # calculate the table of empirical p-values
-        uniq_obs = assign_empirical_pvalues_all(all_df)
+        # the total number of read observations
+        n_read_obs = len(all_df)
+        # the number of unique sequence ids is assumed to be the number of fragment observations
+        n_frag_obs = len(set(all_df.seq))
+        logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
 
-        n_wgs = sum(uniq_obs.read_type == 'wgs')
-        n_hic = sum(uniq_obs.read_type == 'hic')
-        report['unique'] = {'nojunc': n_wgs, 'hasjunc': n_hic}
-        logger.info('Number of unique observations used in empirical p-value: wgs {:,}, hic {:,}'
-                    .format(n_wgs, n_hic))
+        if n_read_obs == n_frag_obs:
+            logger.warning('The number of fragments equals the number of reads, '
+                           'while it is expected that Hi-C data is paired.')
+        logger.info('Fragment observational redundancy: {:.4g}'.format(n_read_obs / n_frag_obs))
 
-        # estimation hic fraction from empirical p-values
-        hic_frac = pvalue_expectation(distribute_pvalues(uniq_obs))
-        report['frac_hic'] = hic_frac
-        logger.info('Estimated Hi-C read fraction via p-value sum method: {:#.4g} \u00b1 {:#.4g} %'
-                    .format(hic_frac['mean'] * 100, hic_frac['error'] * 100))
+        if n_read_obs < 500 or n_frag_obs < 500:
+            # Single estimation for a small observation pool
+            small_pool = True
+            logger.warning('The number of observations was small, bootstrapping will not be performed')
+            _est = pvalue_expectation(assign_empirical_pvalues_all(all_df))
+            hic_frac = np.array([_est['mean'] - _est['error'], _est['mean'] + _est['error']])
+            logger.info('Estimated raw Hi-C read fraction from a single sample via '
+                        'p-value sum method: {:#.4g} - {:#.4g} %'
+                        .format(*hic_frac * 100))
 
-        mean_read_len = cumulative_length / analysis_counter.count('accepted')
-        report['mean_readlen'] = mean_read_len
-        logger.info('Observed mean read length for paired reads: {:.0f}nt'.format(mean_read_len))
+        else:
+            # Use bootstrap resampling to estimate confidence interval
+            small_pool = False
+            _sample_est = []
+            for _ in tqdm.tqdm(range(num_sample), desc='Bootstrapping CI'):
+                # calculate p-values using a sample of observations
+                _smpl = assign_empirical_pvalues_all(extract_sample(all_df, frac_sample, 100, 100000, random_state))
+                # estimate hi-c fraction for this sample
+                _sample_est.append(pvalue_expectation(_smpl))
+            _sample_est = pandas.DataFrame(_sample_est)
 
-        if mean_insert is not None:
-            unobserved_fraction = (mean_insert - mean_read_len * 2) / mean_insert
+            # CI defined by 95% quantile range
+            hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
+            logger.info('Estimated raw Hi-C read fraction from bootstrap resampling '
+                        'via p-value sum method: 95% CI [{:#.4g},{:#.4g}] %'
+                        .format(*hic_frac * 100))
 
-            if unobserved_fraction < 0:
-                unobserved_fraction = 0
-                report['unobs_frac'] = unobserved_fraction
-                logger.warning('For supplied insert length of {:.0f}nt, estimation of the unobserved fraction '
-                               'is invalid (<0). Assuming an unobserved fraction: {:#.4g}'
-                               .format(mean_insert, unobserved_fraction))
+        report['raw_fraction'] = hic_frac
+
+        # TODO for multi-digests with varying length ligation products, using the longest
+        #   will lead to overestimating the observered fraction. This could be calculated as
+        #   a weighted sum over abundance of each possible junction.
+        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), mean_insert, k_size,
+                                                     digest.longest_junction())
+
+        if severe_overlap:
+            logger.warning('Severe pair ooverlap poses double-counting risk, '
+                           'consider merging pairs for quality analysis')
+            logger.warning('Unobserved fraction will be reported as 0')
+        else:
+            logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                        .format(mean_insert, 1 - obs_frac))
+
+        report['adj_fraction'] = hic_frac * 1 / obs_frac
+        if np.any(report['adj_fraction'] > 1):
+            logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
+            report['adj_fraction'] = None
+        else:
+            if small_pool:
+                logger.info('Estimated Hi-C read fraction adjusted for unobserved: {:#.4g} - {:#.4g} %'
+                            .format(*hic_frac * 1/obs_frac * 100))
             else:
-                report['mean_insert'] = mean_insert
-                logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                            .format(mean_insert, unobserved_fraction))
-                report['adj_fraction'] = {'mean': hic_frac['mean'] * (1 + unobserved_fraction),
-                                          'error': hic_frac['error'] * (1 + unobserved_fraction)}
-                logger.info('Adjusted estimation of Hi-C read fraction: {:#.4g} \u00b1 {:#.4g} %'
-                            .format(hic_frac['mean'] * (1 + unobserved_fraction) * 100,
-                                    hic_frac['error'] * (1 + unobserved_fraction) * 100))
+                logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
+                            .format(*hic_frac * 1/obs_frac * 100))
+
+        report['unobs_fraction'] = 0 if severe_overlap else 1 - obs_frac
+
+        report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
+                               'junctions': digest.to_dict('junction')}
+
+        report['junction_frequency'] = {}
+        for _e, _counts in digest.gather_tracker(junction_tracker).items():
+            for _j, _n in _counts.items():
+                logger.info(f'For {_e} junction sequence {_j} found: {_n}')
+                report['junction_frequency'][f'{_e} {_j}'] = _n
 
         # combine them together
         if output_table is not None:
             import os
-            # append the gzip suffix is required
-            if not output_table.endswith('.gz'):
-                output_table = '{}.gz'.format(output_table)
-            # don't overwrite existing files
-            if os.path.exists(output_table):
-                logging.WARNING('The path {} already exists, output table was not written'.format(output_table))
-            else:
-                logger.info('Writing observations to gzipped tab-delimited file: {}'.format(output_table))
-                with gzip.open(output_table, 'wt') as out_h:
-                    all_df.to_csv(out_h, sep='\t')
+            logger.info('Writing observations to gzipped tab-delimited file: {}'.format(output_table))
+            with gzip.open(output_table, 'wt') as out_h:
+                all_df.to_csv(out_h, sep='\t')
+
+    except InsufficientDataException as e:
+        logger.warning(e)
 
     finally:
-        # append report to file
-        if report_path is not None:
-            write_jsonline(report_path, {'kmer_mode': report})
+        if not no_json:
+            write_jsonline(report_path, report, suffix='json', append=False)
+        if not no_html:
+            write_html_report(report_path, report)

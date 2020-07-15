@@ -4,6 +4,32 @@ class ApplicationException(Exception):
         super(ApplicationException, self).__init__(message)
 
 
+class MaxObsLimit(StopIteration):
+    """Maximum observation limit reached"""
+    pass
+
+
+class ZeroCoverageException(ApplicationException):
+    """Queried observations of K-mer coverage summed to zero"""
+    def __init__(self):
+        super(ZeroCoverageException, self).__init__(
+            'Queried observations of K-mer coverage summed to zero')
+
+
+class LowCoverageException(ApplicationException):
+    """Queried observations of K-mer coverage where of insufficient depth"""
+    def __init__(self):
+        super(LowCoverageException, self).__init__(
+            'Queried observations of K-mer coverage were of insufficient depth')
+
+
+class UnknownLibraryKitException(ApplicationException):
+    """The library kit is unknown"""
+    def __init__(self, library_kit: str):
+        super(UnknownLibraryKitException, self).__init__(
+            'The library kit {} is unknown'.format(library_kit))
+
+
 class UnknownEnzymeException(ApplicationException):
     """Supplied enzyme name was not found in biopython"""
     def __init__(self, target: str, similar: list):
