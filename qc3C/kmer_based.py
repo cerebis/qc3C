@@ -6,7 +6,7 @@ import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
@@ -602,7 +602,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     #
     # Reporting
     #
-    report = {
+    report = OrderedDict({
         'mode': 'kmer',
         'runtime_info': runtime_info(),
         'input_args': {'kmer_db': kmer_db,
@@ -626,7 +626,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         'n_high_cov': analysis_counter.count('high_cov'),
         'n_low_cov': analysis_counter.count('low_cov'),
         'n_zero_cov': analysis_counter.count('zero_cov'),
-    }
+    })
 
     logger.info('Number of parsed reads: {:,}'
                 .format(analysis_counter.counts['all']))
@@ -756,10 +756,12 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         # TODO for multi-digests with varying length ligation products, using the longest
         #   will lead to overestimating the observered fraction. This could be calculated as
         #   a weighted sum over abundance of each possible junction.
-        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
+        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), mean_insert, k_size,
+                                                     digest.longest_junction())
 
         if severe_overlap:
-            logger.warning('Severe pair ooverlap poses double-counting risk, consider merging pairs for quality analysis')
+            logger.warning('Severe pair ooverlap poses double-counting risk, '
+                           'consider merging pairs for quality analysis')
             logger.warning('Unobserved fraction will be reported as 0')
         else:
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'

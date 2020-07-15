@@ -677,7 +677,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     # Initial values for report
     #
 
-    report = {
+    report = OrderedDict({
         'mode': 'bam',
         'runtime_info': runtime_info(),
         'input_args': {'bam_file': bam_file,
@@ -719,7 +719,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
                               'self_circle': class_counts['self_circle'],
                               'ffrr': class_counts['ffrr_invalid']}
         }
-    }
+    })
 
     #
     # Log the results
