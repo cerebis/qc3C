@@ -18,29 +18,29 @@ To accomplish this, two modes of analysis are available:
 
 ### From Conda
 
-We maintain conda packages for both qc3C and the supporting _k_-mer counting tool Jellyfish. Installation using conda is very simple.
+Installation using conda is very simple.
+
+We maintain conda packages for both qc3C and a few supporting packages, including a build of the _k_-mer counting tool Jellyfish which includes Python hooks. Please do not install the bioconda kmer-jellyfish package, as this does not possess any language hooks and qc3C will throw `NoModuleFoundError: No module named 'jellyfish'`.
 
 ```$bash
-conda create -n qc3c -c cerebis -c bioconda -c conda-forge qc3C
+conda create -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 ``` 
 
 ### From Docker
 
-A docker image is maintained and published to DockerHub
+A docker image can be obtained and run from DockerHub.
 
 ```$bash
-docker pull cerebis/qc3C:latest
-docker run cerebis/qc3C:latest qc3C -h
+docker pull cerebis/qc3c:latest
+docker run cerebis/qc3c:latest qc3C -h
 ```
 
-The image also includes a the following tools:
+The image includes binaries for the following tools:
 
 - Jellyfish
 - samtoools
 - bwa
-- bbmap
-- spades
-- pigz
+- fastp
 
 ### From Github
 
