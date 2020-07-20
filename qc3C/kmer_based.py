@@ -6,12 +6,12 @@ import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple, OrderedDict
+from collections import namedtuple, OrderedDict, defaultdict
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import init_random_state, write_jsonline, count_sequences, write_html_report, observed_fraction
+from qc3C.utils import write_jsonline, count_sequences, write_html_report, observed_fraction
 from qc3C._version import runtime_info
 
 try:
@@ -318,17 +318,17 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
                 counts['flank'] += 1
 
 
-def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert: int, seed: int = None,
-            sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1, max_obs: int = None,
-            output_table: str = None, report_path: str = None, no_json: bool = False, no_html: bool = False,
-            num_sample: int = 50, frac_sample: float = 1 / 3) -> None:
+def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_insert: int,
+            seed: int = None, sample_rate: float = None, max_freq_quantile: float = 0.9, threads: int = 1,
+            max_obs: int = None, output_table: str = None, report_path: str = None, no_json: bool = False,
+            no_html: bool = False, num_sample: int = 50, frac_sample: float = 1 / 3) -> None:
     """
     Using a read-set and its associated Jellyfish kmer database, analyse the reads for evidence
     of proximity junctions.
 
     :param enzyme_names: the enzymes used during digestion (max 2)
     :param kmer_db: the jellyfish k-mer database
-    :param read_files: the list of read files in FastQ format.
+    :param read_files: list of path names to fastq reads
     :param mean_insert: mean length of inserts used in creating the library
     :param seed: random seed used in subsampling read-set
     :param sample_rate: probability of accepting an observation. If None accept all.
@@ -420,6 +420,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         else:
             progress.set_description('Progress')
 
+    if seed is None:
+        seed = np.random.randint(1000000, 99999999)
+        logger.info('Random seed was not set, using {}'.format(seed))
+
     assert mean_insert > 0, 'Mean insert length must be greater than zero'
     if mean_insert < 100:
         logging.warning('Mean insert length of {}bp is quite short'.format(mean_insert))
@@ -462,10 +466,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
     else:
         logger.info('Acceptance threshold: {:#.2g}'.format(sample_rate))
 
-    # set up random number generation
-    random_state = init_random_state(seed)
-    randint = random_state.randint
-
     starts_with_cutsite = 0
     cumulative_length = 0
 
@@ -501,6 +501,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
 
         for n, reads in enumerate(read_files, 1):
 
+            # init same random number state for each file pass
+            random_state = np.random.RandomState(seed)
+            randint = random_state.randint
+
             set_progress_description()
 
             # set up the generator over FastQ reads, with sub-sampling
@@ -525,6 +529,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                     has_junc = False
 
                     # assume longest junction for these cases
+                    # TODO this should be drawn from the set of possible lengths
+                    #  but will only affect Arima currently
                     junc_len = longest_site
 
                     # try to find a randomly selected region which does not contain
@@ -720,9 +726,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
 
         if n_read_obs == n_frag_obs:
-            logger.warning('The number of fragments equals the number of reads, '
-                           'while it is expected that Hi-C data is paired.')
-        logger.info('Fragment observational redundancy: {:.4g}'.format(n_read_obs / n_frag_obs))
+            logger.warning('Equal number of fragments and reads! Hi-C is expected to be paired.')
+        obs_redundancy = n_read_obs / n_frag_obs
+        logger.info('Fragment observational redundancy: {:.4g}'.format(obs_redundancy))
 
         if n_read_obs < 500 or n_frag_obs < 500:
             # Single estimation for a small observation pool
@@ -735,6 +741,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
                         .format(*hic_frac * 100))
 
         else:
+            # init same random number state
+            random_state = np.random.RandomState(seed)
             # Use bootstrap resampling to estimate confidence interval
             small_pool = False
             _sample_est = []
@@ -756,16 +764,19 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
         # TODO for multi-digests with varying length ligation products, using the longest
         #   will lead to overestimating the observered fraction. This could be calculated as
         #   a weighted sum over abundance of each possible junction.
-        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), mean_insert, k_size,
-                                                     digest.longest_junction())
-
-        if severe_overlap:
-            logger.warning('Severe pair ooverlap poses double-counting risk, '
+        obs_frag_mask = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
+        # consider with overlaps have occured which leads to double counting
+        obs_frac = obs_frag_mask.mean()
+        if 1 - obs_frac < 0:
+            logger.warning('Read-pairs have sampling overlap due to small fragment size')
+            logger.warning('Significant pair overlap poses double-counting risk, '
                            'consider merging pairs for quality analysis')
             logger.warning('Unobserved fraction will be reported as 0')
+            report['unobs_fraction'] = 0
         else:
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
                         .format(mean_insert, 1 - obs_frac))
+            report['unobs_fraction'] = 1 - obs_frac
 
         report['adj_fraction'] = hic_frac * 1 / obs_frac
         if np.any(report['adj_fraction'] > 1):
@@ -778,8 +789,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: list, mean_insert
             else:
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
                             .format(*hic_frac * 1/obs_frac * 100))
-
-        report['unobs_fraction'] = 0 if severe_overlap else 1 - obs_frac
 
         report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
                                'junctions': digest.to_dict('junction')}

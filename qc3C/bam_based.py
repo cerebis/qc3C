@@ -844,12 +844,12 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     if emp_median is None:
         logger.warning('Unobserved fraction not estimated as insert size was not available')
     else:
-        obs_frac, severe_overlap = observed_fraction(int(mean_read_len), int(emp_median),
-                                                     junc_size=digest.longest_junction())
-        if not severe_overlap:
-            logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                        .format(emp_median, 1 - obs_frac))
-        report['unobs_fraction'] = 0 if severe_overlap else 1 - obs_frac
+        obs_frac_mask = observed_fraction(int(mean_read_len), int(emp_median), 0, junc_size=digest.longest_junction())
+        # consider only if a fragment position is covered by the reads
+        obs_frac = (obs_frac_mask > 0).mean()
+        logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+                    .format(emp_median, 1 - obs_frac))
+        report['unobs_fraction'] = 1 - obs_frac
 
     # digest statistics
     digest_stats = {'cs_start': digest_counts['cs_start'],

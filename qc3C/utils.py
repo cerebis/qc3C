@@ -38,8 +38,76 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     return obs_extent / (mean_frag_size * n_fragments)
 
 
-def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
-                      junc_size: int = 0, is_phase: bool = False, is_single: bool = False) -> Tuple[float, bool]:
+# def observed_extent_new(obs_table, insert_len, read_len, kmer_size, junc_size):
+#
+#     def _make_observable_mask(read_len: int, insert_len: int, kmer_size: int,
+#                              junc_size: int) -> np.ndarray:
+#         """
+#         Use a mask to calculate the proportion of a fragment which can be interrogated
+#         due to the need for a sliding window around any observed junction sequence.
+#
+#         :param read_len: the average read-length
+#         :param insert_len: the average insert (or fragment) length
+#         :param kmer_size: the requested k-mer size
+#         :param junc_size: the junction size
+#         :param is_single: the observational set has been reduced to a single read per fragment
+#         :return:
+#         """
+#
+#         frag_mask = np.zeros(insert_len, dtype=np.uint8)
+#         read_mask = np.zeros(read_len, dtype=np.uint8)
+#         x_min, x_max = kmer_size , read_len - (kmer_size + junc_size )
+#         # create a read mask that represents the region of the read which can be interrogated
+#         read_mask[x_min:x_max] = 1
+#         # create a fragment mask by transferring this silhouette to either end of the fragment
+#         # handling the edge-case where the insert length is less than the read length
+#         a = read_len if read_len < insert_len else insert_len
+#         frag_mask[:a] += read_mask[:a]
+#         frag_mask[-a:] += read_mask[::-1][-a:]
+#         # return the fragment mask
+#         return frag_mask
+#
+#     n_junc_reads = len(obs_table[obs_table.has_junc == True])
+#     n_nojunc_reads = len(obs_table[obs_table.has_junc == False])
+#     logger.debug('Read count: with junc {}, without junc {}'.format(n_junc_reads, n_nojunc_reads))
+#     n_junc_frags = len(set(obs_table[obs_table.has_junc == True].seq))
+#     n_nojunc_frags = len(set(obs_table[obs_table.has_junc == False].seq))
+#     logger.debug('Frag count: with junc {}, without junc {}'.format(n_junc_frags, n_nojunc_frags))
+#
+#     # junc_cover = (_make_observable_mask(read_len, insert_len, kmer_size, junc_size) > 0).sum()
+#     # nojunc_cover = (_make_observable_mask(read_len, insert_len, 0, 0) > 0).sum()
+#     junc_cover = _make_observable_mask(read_len, insert_len, kmer_size, junc_size).sum()
+#     nojunc_cover = (_make_observable_mask(read_len, insert_len, 0, 0) > 0).sum()
+#     logger.debug('Insert coveraege: with junc {} without junc {}'.format(junc_cover, nojunc_cover))
+#
+#     junc_redunancy = n_junc_reads / n_junc_frags / 2
+#     nojunc_redunancy = n_nojunc_reads / n_nojunc_frags / 2
+#     logger.debug('Read to frag redunancy: with junc {} without junc {}'.format(junc_redunancy, nojunc_redunancy))
+#
+#     junc_obs_frac = junc_redunancy * junc_cover
+#     nojunc_obs_frac = nojunc_redunancy * nojunc_cover
+#     logger.debug('Observed fractions: with junc {} without junc {}'.format(junc_obs_frac, nojunc_obs_frac))
+#
+#     average_obs_frac = (junc_obs_frac * n_junc_frags + nojunc_obs_frac * n_nojunc_frags) / \
+#                        (insert_len * (n_junc_frags + n_nojunc_frags))
+#     logger.debug('Average combined obs frac: {}'.format(average_obs_frac))
+#
+#     # sanity checks that should not get invoked
+#     if average_obs_frac < 0:
+#         logger.warning('Estimate for observed fraction < 0, resetting to 0.')
+#         average_obs_frac = 0
+#
+#     if 1 - average_obs_frac < 0:
+#         logger.warning('Read-pairs have significant overlap due to small fragment size')
+#         severe_overlap = True
+#     else:
+#         logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
+#                     .format(insert_len, 1 - average_obs_frac))
+#         severe_overlap = False
+#
+#     return average_obs_frac, severe_overlap
+
+def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0, junc_size: int = 0) -> np.ndarray:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -49,13 +117,10 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
     :param insert_len: the average insert (or fragment) length
     :param kmer_size: the requested k-mer size
     :param junc_size: the junction size
-    :param is_phase: whether or not the library was constructed using Phase's kit
-    :param is_single: the observational set has been reduced to a single read per fragment
-    :return: tuple of observed fraction value and overlap status
+    :return: additive covering mask of the fragment for experimental conditions
     """
 
-    def make_observable_mask(read_len: int, insert_len: int, kmer_size: int,
-                             junc_size: int, is_single: bool) -> np.ndarray:
+    def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_size: int) -> np.ndarray:
         """
         Use a mask to calculate the proportion of a fragment which can be interrogated
         due to the need for a sliding window around any observed junction sequence.
@@ -64,12 +129,11 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
         :param insert_len: the average insert (or fragment) length
         :param kmer_size: the requested k-mer size
         :param junc_size: the junction size
-        :param is_single: the observational set has been reduced to a single read per fragment
         :return:
         """
 
-        frag_mask = np.zeros(insert_len, dtype=np.uint8)
-        read_mask = np.zeros(read_len, dtype=np.uint8)
+        frag_mask = np.zeros(insert_len, dtype=np.float)
+        read_mask = np.zeros(read_len, dtype=np.float)
         x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
         # create a read mask that represents the region of the read which can be interrogated
         read_mask[x_min:x_max] = 1
@@ -77,63 +141,14 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0,
         # handling the edge-case where the insert length is less than the read length
         a = read_len if read_len < insert_len else insert_len
         frag_mask[:a] += read_mask[:a]
-        if not is_single:
-            # treat both ends if paired
-            frag_mask[-a:] += read_mask[::-1][-a:]
+        frag_mask[-a:] += read_mask[::-1][-a:]
         # return the fragment mask
         return frag_mask
 
+    # TODO this function is currently trivial but will remain as I expect to refine this critical step
     read_len = round(read_len)
     insert_len = round(insert_len)
-
-    obs_mask = make_observable_mask(read_len, insert_len, kmer_size, junc_size, is_single)
-
-    if is_phase:
-
-        logger.debug('Calculating the observed fraction as a Phase library')
-
-        # phase's library construction appears to produce a non-uniform distribution
-        # of junction locations, preferring the interior of the fragment to the ends.
-        rv = beta(2, 2)
-
-        # find the windows across the fragment which are observed
-        obs_wins = []
-        start = None
-        for i in range(len(obs_mask)):
-            if obs_mask[i]:
-                if start is None:
-                    start = i
-            elif start is not None:
-                obs_wins.append([start, i])
-                start = None
-        if start is not None:
-            obs_wins.append([start, len(obs_mask)])
-
-        # sum the distribution slices from each window
-        obs_frac = 0
-        for wi in obs_wins:
-            obs_frac += rv.cdf(wi[1] / insert_len) - rv.cdf(wi[0] / insert_len)
-
-    else:
-        logger.debug('Calculating the observed fraction as a generic library')
-
-        # uniform treatment
-        obs_frac = obs_mask.mean()
-
-    # sanity checks that should not get invoked
-    if obs_frac < 0:
-        logger.warning('Estimate for observed fraction < 0, resetting to 0.')
-        obs_frac = 0
-
-    if 1 - obs_frac < 0:
-        logger.warning('Read-pairs have significant overlap due to small fragment size')
-        severe_overlap = True
-    else:
-        logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-                    .format(insert_len, 1 - obs_frac))
-        severe_overlap = False
-
-    return obs_frac, severe_overlap
+    return make_observable_mask(read_len, insert_len, kmer_size, junc_size)
 
 
 def count_sequences(file_name: str, fmt: str, max_cpu: int = 1) -> int:
@@ -325,5 +340,3 @@ def write_html_report(fpath: str, report: Dict):
         _html_table = json2html.convert(to_json_string(report), table_attributes='', escape=True)
         fp.write('        {}\n'.format(_html_table))
         fp.write("    </body>\n</html>")
-
-
