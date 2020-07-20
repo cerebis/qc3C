@@ -91,6 +91,7 @@ def main():
     """
     global_parser = argparse.ArgumentParser(add_help=False)
     global_parser.add_argument('-d', '--debug', default=False, action='store_true', help='Enable debug output')
+    global_parser.add_argument('-y', '--yes', default=False, action='store_true', help='Do not ask for confirmation')
     global_parser.add_argument('-v', '--verbose', default=False, action='store_true', help='Verbose output')
     global_parser.add_argument('-t', '--threads', metavar='N', type=int, default=1, help='Number of threads [1]')
     global_parser.add_argument('-o', '--output-path', metavar='PATH', default='.', action=UniqueStore,
@@ -158,6 +159,10 @@ def main():
     """
     cmd_kmer = command_parsers.add_parser('kmer', parents=[global_parser, analysis_parser],
                                           conflict_handler='resolve', description='Kmer-based analysis.')
+    cmd_kmer.add_argument('--ascii-base', default=33, choices=[33, 64], type=int,
+                          help='Ascii-encoding base for quality scores [33]')
+    cmd_kmer.add_argument('--min-quality', default=10, type=int, action=UniqueStore,
+                          help='Minimum quality before a base position is converted to N')
     cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
     cmd_kmer.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
@@ -262,12 +267,14 @@ def main():
                 raise ApplicationException('some supplied input read-sets are the same file')
 
             if args.lib is None:
-                build_lib = yes_or_no('No k-mer library was specified.\n Build one from reads first?')
+                build_lib = (True if args.yes else
+                             yes_or_no('No k-mer library was specified.\n Build one from reads first?'))
                 if not build_lib:
                     raise ApplicationException('A k-mer library is required to proceed')
                 args.lib = 'qc3c_kmers.jf'
             elif not os.path.exists(args.lib):
-                build_lib = yes_or_no('The library {} does not exist.\n Build one from reads first?'.format(args.lib))
+                build_lib = (True if args.yes else
+                             yes_or_no('The library {} does not exist.\n Build one from reads first?'.format(args.lib)))
                 if not build_lib:
                     raise ApplicationException('A k-mer library is required to proceed')
             else:
@@ -275,7 +282,8 @@ def main():
 
             if build_lib:
                 args.lib = make_lib_path(args)
-                mk_database(args.lib, args.reads, args.kmer_size, args.hash_size, args.threads)
+                mk_database(args.lib, args.reads, args.kmer_size, args.hash_size,
+                            args.ascii_base, args.min_quality, args.threads)
 
             table_path = None if not args.write_table else os.path.join(args.output_path, __table_name__)
 
