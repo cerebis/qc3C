@@ -18,6 +18,24 @@ def main():
     import argparse
     import sys
 
+    def yes_or_no(question):
+        while "the answer is invalid":
+            reply = str(input(question+' (y/n): ')).lower().strip()
+            if reply[:1] == 'y':
+                return True
+            if reply[:1] == 'n':
+                return False
+
+    def make_lib_path(args):
+        if os.path.basename(args.lib) != args.lib:
+            raise ApplicationException('The supplied library name should not include any path')
+        if not args.lib.endswith('.jf'):
+            args.lib = '{}.jf'.format(args.lib)
+        lib_path = os.path.join(args.output_path, args.lib)
+        if os.path.exists(lib_path):
+            ApplicationException('Output path already exists: {}'.format(lib_path))
+        return lib_path
+
     class UniqueStore(argparse.Action):
         """
         Restrict an argparse argument to only one occurrence
@@ -100,19 +118,34 @@ def main():
     parser = argparse.ArgumentParser(description='qc3C: Hi-C quality control')
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
 
-    subparsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
+    command_parsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
                                        help='choose an analysis stage for further options')
-    subparsers.required = False
-    cmd_bam = subparsers.add_parser('bam', parents=[global_parser, analysis_parser],
-                                    description='Alignment-based analysis.')
-    cmd_kmer = subparsers.add_parser('kmer', parents=[global_parser, analysis_parser],
-                                     description='Kmer-based analysis.')
-    cmd_mkdb = subparsers.add_parser('mkdb', parents=[global_parser],
-                                     description='Create kmer database.')
+    command_parsers.required = False
+
+    """
+    CLI for creating kmer database
+    """
+    cmd_mkdb = command_parsers.add_parser('mkdb', parents=[global_parser],
+                                          description='Create kmer database.')
+    cmd_mkdb.add_argument('--ascii-base', default=33, choices=[33, 64], type=int,
+                          help='Ascii-encoding base for quality scores [33]')
+    cmd_mkdb.add_argument('--min-quality', default=10, type=int, action=UniqueStore,
+                          help='Minimum quality before a base position is converted to N')
+    cmd_mkdb.add_argument('--hash-size', default='10M', action=UniqueStore,
+                          help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
+    cmd_mkdb.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
+                          help='K-mer size to use in generating a library [24]')
+    cmd_mkdb.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
+                          help='FastQ format reads to use in generating the k-mer library '
+                               '(use multiple times for multiple files)')
+    cmd_mkdb.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
+                          help='Output Jellyfish k-mer library base name')
 
     """
     CLI for BAM based analysis
     """
+    cmd_bam = command_parsers.add_parser('bam', parents=[global_parser, analysis_parser],
+                                         description='Alignment-based analysis.')
     cmd_bam.add_argument('-q', '--min-mapq', default=60, type=int, action=UniqueStore,
                          help='Minimum acceptable mapping quality [60]')
     cmd_bam.add_argument('-f', '--fasta', required=True, action=UniqueStore,
@@ -123,6 +156,12 @@ def main():
     """
     CLI for Kmer based analysis
     """
+    cmd_kmer = command_parsers.add_parser('kmer', parents=[global_parser, analysis_parser],
+                                          conflict_handler='resolve', description='Kmer-based analysis.')
+    cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
+                          help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
+    cmd_kmer.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
+                          help='K-mer size to use in generating a library [24]')
     cmd_kmer.add_argument('--merged-reads', default=False, action='store_true',
                           help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
@@ -137,24 +176,11 @@ def main():
                           help='Ignore k-mers possessing frequencies above this quantile [0.9]')
     cmd_kmer.add_argument('-m', '--mean-insert', type=int, required=True, action=UniqueStore,
                           help='Mean fragment length to use in estimating the unobserved junction rate')
-    cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=True, action=UniqueStore,
+    cmd_kmer.add_argument('-l', '--lib', metavar='KMER_LIB', required=False, action=UniqueStore,
                           help='Jellyfish kmer database')
     cmd_kmer.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
                           help='FastQ format reads that were used to generate the k-mer library '
                                '(use multiple times for multiple files)')
-
-    """
-    CLI for creating kmer database
-    """
-    cmd_mkdb.add_argument('-s', '--hash-size', default='10M', action=UniqueStore,
-                          help='Initial hash size (eg. 10M, 2G) [10M]')
-    cmd_mkdb.add_argument('-k', '--kmer-size', default=24, type=int, action=UniqueStore,
-                          help='Library kmer size [24]')
-    cmd_mkdb.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
-                          help='FastQ format reads to use in generating the k-mer library '
-                               '(use multiple times for multiple files)')
-    cmd_mkdb.add_argument('-l', '--lib', metavar='KMER_LIB', required=True,
-                          help='Output Jellyfish k-mer library base name')
 
     args = parser.parse_args()
 
@@ -217,20 +243,8 @@ def main():
 
         if args.command == 'mkdb':
 
-            if os.path.basename(args.lib) != args.lib:
-                logger.error('The supplied library name should not include any path')
-                sys.exit(1)
-
-            if not args.lib.endswith('.jf'):
-                args.lib = '{}.jf'.format(args.lib)
-
-            klib_path = os.path.join(args.output_path, args.lib)
-
-            if os.path.exists(klib_path):
-                logger.error('Output path already exists: {}'.format(klib_path))
-                sys.exit(1)
-
-            mk_database(klib_path, args.reads, args.kmer_size, args.hash_size, args.threads)
+            mk_database(make_lib_path(args), args.reads, args.kmer_size, args.hash_size,
+                        args.ascii_base, args.min_quality, args.threads)
 
         # BAM based analysis
         elif args.command == 'bam':
@@ -243,13 +257,30 @@ def main():
         # Kmer based analysis
         elif args.command == 'kmer':
 
+            read_paths = [os.path.realpath(fi) for fi in args.reads]
+            if len(set(read_paths)) != len(read_paths):
+                raise ApplicationException('some supplied input read-sets are the same file')
+
+            if args.lib is None:
+                build_lib = yes_or_no('No k-mer library was specified.\n Build one from reads first?')
+                if not build_lib:
+                    raise ApplicationException('A k-mer library is required to proceed')
+                args.lib = 'qc3c_kmers.jf'
+            elif not os.path.exists(args.lib):
+                build_lib = yes_or_no('The library {} does not exist.\n Build one from reads first?'.format(args.lib))
+                if not build_lib:
+                    raise ApplicationException('A k-mer library is required to proceed')
+            else:
+                build_lib = False
+
+            if build_lib:
+                args.lib = make_lib_path(args)
+                mk_database(args.lib, args.reads, args.kmer_size, args.hash_size, args.threads)
+
             table_path = None if not args.write_table else os.path.join(args.output_path, __table_name__)
 
-            if len(set(args.reads)) != len(args.reads):
-                parser.error('Some supplied input read-sets are the same file')
-
             if args.merged_reads:
-                logger.info('Merged reads specified, insert size will be ignored')
+                raise ApplicationException('Merged reads specified, insert size will be ignored')
 
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,

@@ -6,13 +6,9 @@ We use "signal" to refer to the proportion of read-pairs which are true products
  
 To accomplish this, two modes of analysis are available:
 
-- BAM mode
+- **BAM mode:** conventional assessment requiring read-mapping to a reference.
 
-    Conventional assessment requiring a reference sequence and read-mapping.
-
-- _K_-mer mode
-
-    **Reference-free** assessment requiring only a Hi-C read-set. 
+- **_K_-mer mode:** **reference-free** assessment requiring only a Hi-C read-set. 
 
 ## Installation
 
@@ -20,7 +16,7 @@ To accomplish this, two modes of analysis are available:
 
 Installation using conda is very simple.
 
-We maintain conda packages for both qc3C and a few supporting packages, including a build of the _k_-mer counting tool Jellyfish which includes Python hooks. Please do not install the bioconda kmer-jellyfish package, as this does not possess any language hooks and qc3C will throw `NoModuleFoundError: No module named 'jellyfish'`.
+We maintain conda packages for both qc3C and a few supporting packages, including a build of the _k_-mer counting tool Jellyfish which includes Python hooks. Please do not install the bioconda kmer-jellyfish package, as it does not possess language hooks and qc3C will fail, throwing `NoModuleFoundError: No module named 'jellyfish'`.
 
 ```$bash
 conda create -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
@@ -44,14 +40,14 @@ The image includes binaries for the following tools:
 
 ### From Github
 
-qc3C can be installed directly from github, however this requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, the a build which correctly creates the Python hooks is more problematic. To remedy this, users are encouraged to use our Jellyfish conda package, after which qc3C is easily installed using Pip.
+qc3C can be installed directly from github, however this requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, a build which correctly creates the Python hooks is more problematic. To remedy this, users are encouraged to use our Jellyfish conda package, after which qc3C is easily installed using Pip.
 
-**Note:** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, when run qc3C will throw `NoModuleFoundError: No module named 'jellyfish'`. 
+**Note:** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, qc3C will fail to run with the error `NoModuleFoundError: No module named 'jellyfish'`. 
 
 The following bash snippet prepares the conda environment with our Jellyfish package and installs qc3C directly from Github.
 
 ```$bash
-conda create -y -n qc3c -c cerebis -c bioconda -c conda-forge jellyfish
+conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda jellyfish
 conda activate qc3c
 pip install git+https://github.com/cerebis/qc3C
 ```
