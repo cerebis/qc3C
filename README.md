@@ -1,47 +1,53 @@
 # qc3C - reference-free quality control for Hi-C DNA sequencing libraries
 
-The aim of qc3C is to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library and thereby judge its quality as experimental data. 
+The primary aim of qc3C is to infer the proportion of "signal" within a Hi-C sequencing library and thereby provide a means of quality control. A big advantange of qc3C is that this can be done without access to a reference sequence, which until now has been a significant stopping point for projects not involving model organisms. 
 
 By "signal" we mean the proportion of read-pairs which are true products of proximity ligation rather than pairs resulting from undesirable processes, which in downstream analyses will constitute noise in the experiment. When inferring the proportion of Hi-C pairs, no restriction is made on their separation distance. This is in contrast to reference-based methods which typically look at only the proportion of pairs that map at long-range (e.g. the number of pairs separated by more than 10 kbp). 
 
-Although the proportion of long-range pairs is indeed an important factor, this cannot be established without the use of a reference sequence. The reference requirement is troublesome for any project which does not involve model organisms. Further, in cases where a draft assemblies is available, the degree of assembly fragmentation acts as a negative bias when trying to observe long-range pairs.
+Although the proportion of long-range pairs is indeed an important attribute, this type of information cannot be established without the use of a reference sequence (preferably high-quality). In cases where a draft assembly is used, sequence fragmentation reduces the likelihood of observing pairs with large separation.
 
-Since reference-based assessment can be of interest, qc3C can also perform this type of analysis and provide additional statistics which may be of interest. These include such read-through events, HiCPro style pair categorisation (e.g. dangling-end, self-circle, etc).
+Still, details from reference-based assessment remain of interest and therefore qc3C can also perform this type of analysis. What we call "bam mode" analysis. Statistics obtained from this mode include such details as the number of read-through events and HiCPro style pair categorisation (e.g. dangling-end, self-circle, etc).
 
 ## Two modes of analysis
 
 - **_k_-mer mode:** reference-free assessment requiring only a Hi-C read-set. 
 
-- **BAM mode:** conventional assessment requiring read-mapping to a reference.
-
+- **bam mode:** conventional assessment requiring read-mapping to a reference.
 
 ## Installation
 
-### From Conda
+### Requirements
 
-Installation using conda is very simple.
+Due to our dependency on Jellyfish, qc3C requires Linux x86_64 to run natively. With that said, we maintain a Docker image which will run on other platforms.
 
-We maintain conda packages for both qc3C and a few supporting packages, including a build of the _k_-mer counting tool Jellyfish which includes Python hooks. Please do not install the bioconda kmer-jellyfish package, as it does not possess language hooks and qc3C will fail, throwing `NoModuleFoundError: No module named 'jellyfish'`.
+### Using Conda
 
-```$bash
-conda create -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
+We maintain conda packages for both qc3C and a few supporting packages on the Anaconda channel [cerebis](https://anaconda.org/cerebis). 
+
+Installation is accomplished as follows.
+```
+conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 ``` 
 
-### From Docker
+Note: our anaconda channel includes a build of the _k_-mer counting tool Jellyfish with Python language hooks. **Please do not install the bioconda kmer-jellyfish package** as it does not possess language hooks and qc3C will fail to run, throwing `NoModuleFoundError: No module named 'jellyfish'`.
 
-A docker image can be obtained and run from DockerHub.
+### Using Docker
 
-```$bash
-docker pull cerebis/qc3c:latest
-docker run cerebis/qc3c:latest qc3C -h
+A docker image is available from DockerHub at docker://cerebis/qc3c.
+
+```
+docker pull cerebis/qc3c
+docker run cerebis/qc3c -h
 ```
 
-The image includes binaries for the following tools:
+### Using Singularity
 
-- Jellyfish
-- samtoools
-- bwa
-- fastp
+We rely on singularity users importing our Docker image, which could be done as follows.
+
+```
+singularity build qc3C.sif docker://cerebis/qc3c
+singularity run qc3C.sif
+```
 
 ### From Github
 
@@ -105,10 +111,6 @@ Using the standard interface of MultiQC, in the output folder as above
 multiqc output
 ```
 
-#### _k_-mer mode analysis
-
-Assu
-
 ### Defining a library's digest
 
 In either style of analysis, users must tell qc3C which enzymes were used in the DNA digestion step during library generation. This can be accomplished by either specifying these enzyme(s) by name or the commercial kit. Currently only Phase and Arima kits are defined within qc3C.
@@ -160,7 +162,19 @@ INFO     | 2020-07-22 13:04:02,942 | qc3C.ligation | No cut-site database cache 
 INFO     | 2020-07-22 13:04:02,965 | qc3C.ligation | Building cut-site database against reference sequence and DpnII
 ```
 
-### Creating A BAM file for QC analysis
+### Creating a k-mer database for QC analysis
+
+Reference-free quality assessment is a main feature of qc3C and is particularly convenient in cases where a reference is not available or of poor quality. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to initially generate the k-mer database from the Hi-C read-set and afterwards uses Jellyfish's Python to analyse it.
+
+When invoking a _k_-mer mode analysis, if you do not supply an existing _k_-mer database qc3C will offer to create it first. Otherwise, you can explicitly create the database before hand using the subcommand `mkdb` as follows.
+
+```
+qc3C mkdb -r reads_r1.fq.gz -r reads_r2.fq.gz -l kmer_db.jf 
+```
+
+Under the hood, qc3C is invoking Jellyfish to create the _k_-mer database. Jellyfish itself is quite an efficient program, but can require significant memory for larger genomes. [see Jellyfish FAQ](https://github.com/gmarcais/Jellyfish/blob/master/doc/Readme.md#how-much-memory-is-needed)
+
+### Creating A bam file for QC analysis
 
 To quality-assess a Hi-C read-set using BAM mode, users must first map the Hi-C reads to a reference sequence obtained from the same source. 
 
@@ -168,47 +182,29 @@ We recommend using [BWA MEM](https://github.com/lh3/bwa) for this purpose, with 
  
 Below is an example of aligning Hi-C reads to a reference.  
 
-```$bash
+```
 bwa index ref.fa
 bwa mem -5SP ref.fna.gz hic_reads.fq.gz | samtools view -bS - | samtools sort -n -o hic_to_ref.bam -
 ```
 
 The state of the reference can range from a completed genome to assembly contigs, but users should keeo in mind that as the reference becomes more fragmented, assessing long-range _cis_-contacts will become increasingly hampered by short references on which to map reads. Further, _trans_-contocts (inter-molecular contacts) cannot be distinguished from those which merely connect broken segments from the same molecule.
 
-### Creating a k-mer library for QC analysis
 
-Reference-free quality assessment is also possible with qc3C and is convenient in cases where a reference is not available or users do not wish to spend the time creating the BAM file as above. At present, qc3C relies on [Jellyfish](https://github.com/gmarcais/jellyfish) to initially generate the k-mer library from the Hi-C read-set and afterwards uses Jellyfish's Python to analyse it.
+### Notes on running QC analyses
 
-Below is an example of creating the k-mer library from a Hi-C read-set.
+#### Limit maximum observations
 
-```$bash
-qc3C mkdb -r hic_reads.fq.gz -l hic_reads.jf 
-```
+Analysing the entirety of a large read-set is unnecessary to obtain reliable evidence of overall quality. To limit an analysis to a smaller subset, users can specify the maximum total number of observations (`--max-obs`) and/or control acceptance rate `--sample-rate`. In testing, we have found reliable results from 100,000 reads.
 
-### Running a QC analysis
+#### Accurate insert size in _k_-mer mode
 
-In either mode, qc3C searches the read-pairs for evidence of proximity ligation. This evidence is then used to infer whether or not a generated library contains a strong signal (a high fraction of proximity-ligation containing read-pairs). By employing quality analysis on less expensive, small-scale pilot sequencing runs, users are better able to decide whether larger-scale sequencing should proceed and to what depth. Given sufficient budget, experiments which produced low-signal libraries might be rescued through deeper sequencing. 
+It is vitally important that an accurate estimate of the insert/fragment size is known. This value should reflect the averae size of the unknown sequence only. In testing, we have found that sequencing facilities can inadvertently quote larger values, which will affect qc3C's adjusted (or extrapolated) signal estimates.
 
-Analysing the entirety of a large read-set is unnecessary to obtain reliable evidence of a read-sets overall quality. To look at only a sample of observations, users can limit the total number of observations (`--max-obs`) and/or control acceptance rate `--sample-rate`. In testing, we have found reliable results from 100,000 reads.
+#### Obtaining an insert size using qc3C
 
-Example usage for a Hi-C library generated with a single enzyme.
+If a reference is available, bam mode can be used to obtain an good estimate of the median and mean observed insert size. This can subsequently be used when invoking the _k_-mer mode analysis. Using both modes may seem redudant, but each assesses your read-set from a different perspective.
 
-#### BAM mode
-
-```$bash
-qc3C bam -enzyme DpnII --bam hic_to_ref.bam --fasta ref.fna.gz
-
-```
-
-#### _K_-mer mode
-
-```$bash
-qc3C kmer --mean-insert 500 -enzyme DpnII --reads hic_reads.fq.gz --lib hic_reads.jf
-```
-
-**Note** it is vitally important that an accurate estimate of the insert/fragment length is known. This value should purely reflect the size of the unknown sequence. Care should be taken that this value **does not** include adapter. In testing, we have found that sequencing facilities can inadvertently quote this larger value. 
-
-If a reference is available, qc3C BAM mode will report both median and mean observed insert size, which can subsequently be used in _k_-mer mode. When available, information from both modes is of value, as _k_-mer mode estimates the fraction of proximity-ligation pairs, while apart from estimating insert size, BAM mode reports other interesting summary statistics such as the number of observed read-through events, and a breakdown of pairs (self-circle, dangling-end, etc). 
+While _k_-mer mode estimates the fraction of proximity-ligation pairs, while apart from estimating insert size, bam mode reports other interesting summary statistics such as the number of observed read-through events, and a breakdown of pairs (self-circle, dangling-end, etc). 
 
 ### Command line help
 
@@ -228,91 +224,113 @@ commands:
 ```
 
 
+#### Usage for _k_-mer mode
+
+```usage: qc3C kmer [-h] [-d] [-y] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] [--no-html]
+                 (-k {phase,arima} | -e NEB_NAME) [--ascii-base {33,64}] [--min-quality MIN_QUALITY] [--hash-size HASH_SIZE] [--kmer-size KMER_SIZE]
+                 [--merged-reads] [--write-table] [--num-sample NUM_SAMPLE] [--frac-sample {range (0,1]}] [-x {range (0,1]}] -m MEAN_INSERT
+                 [-l KMER_LIB] -r FASTQ_FILE
+
+Kmer-based analysis.
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -d, --debug           Enable debug output
+  -y, --yes             Do not ask for confirmation
+  -v, --verbose         Verbose output
+  -t N, --threads N     Number of threads [1]
+  -o PATH, --output-path PATH
+                        Write output files to this folder [.]
+  -p {range (0,1]}, --sample-rate {range (0,1]}
+                        Sample only a proportion of all read-pairs [None]
+  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
+  -M MAX_OBS, --max-obs MAX_OBS
+                        Stop after collecting this many observations
+  --no-json             Do not write a JSON report
+  --no-html             Do not write an HTML report
+  -k {phase,arima}, --library-kit {phase,arima}
+                        Define digest by the commercial library kit used
+  -e NEB_NAME, --enzyme NEB_NAME
+                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
+  --ascii-base {33,64}  Ascii-encoding base for quality scores [33]
+  --min-quality MIN_QUALITY
+                        Minimum quality before a base position is converted to N
+  --hash-size HASH_SIZE
+                        Initial hash size in generating a library (eg. 10M, 2G) [10M]
+  --kmer-size KMER_SIZE
+                        K-mer size to use in generating a library [24]
+  --merged-reads        Input reads are merged pairs
+  --write-table         Save the collected observations to a file
+  --num-sample NUM_SAMPLE
+                        Number of samples to use in bootstrapping confidence interval [50]
+  --frac-sample {range (0,1]}
+                        Fraction of observations to use per-bootstrap iteration [1/3]
+  -x {range (0,1]}, --max-freq-quantile {range (0,1]}
+                        Ignore k-mers possessing frequencies above this quantile [0.9]
+  -m MEAN_INSERT, --mean-insert MEAN_INSERT
+                        Mean fragment length to use in estimating the unobserved junction rate
+  -l KMER_LIB, --lib KMER_LIB
+                        Jellyfish kmer database
+  -r FASTQ_FILE, --reads FASTQ_FILE
+                        FastQ format reads that were used to generate the k-mer library (use multiple times for multiple files)
+```
+
+#### Usage for bam mode
+
+```usage: qc3C bam [-h] [-d] [-y] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] [--no-html]
+                (-k {phase,arima} | -e NEB_NAME) [-q MIN_MAPQ] -f FASTA -b BAM
+
+Alignment-based analysis.
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -d, --debug           Enable debug output
+  -y, --yes             Do not ask for confirmation
+  -v, --verbose         Verbose output
+  -t N, --threads N     Number of threads [1]
+  -o PATH, --output-path PATH
+                        Write output files to this folder [.]
+  -p {range (0,1]}, --sample-rate {range (0,1]}
+                        Sample only a proportion of all read-pairs [None]
+  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
+  -M MAX_OBS, --max-obs MAX_OBS
+                        Stop after collecting this many observations
+  --no-json             Do not write a JSON report
+  --no-html             Do not write an HTML report
+  -k {phase,arima}, --library-kit {phase,arima}
+                        Define digest by the commercial library kit used
+  -e NEB_NAME, --enzyme NEB_NAME
+                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
+  -q MIN_MAPQ, --min-mapq MIN_MAPQ
+                        Minimum acceptable mapping quality [60]
+  -f FASTA, --fasta FASTA
+                        Reference sequences
+  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to references
+```
+
 #### Usage for mkdb
-```$bash
-usage: qc3C mkdb [-h] [-d] [-v] [-t N] [-o PATH] [-s HASH_SIZE] [-k KMER_SIZE] -r FASTQ_FILE -l KMER_LIB
+```usage: qc3C mkdb [-h] [-d] [-y] [-v] [-t N] [-o PATH] [--ascii-base {33,64}] [--min-quality MIN_QUALITY] [--hash-size HASH_SIZE]
+                 [--kmer-size KMER_SIZE] -r FASTQ_FILE -l KMER_LIB
 
 Create kmer database.
 
 optional arguments:
   -h, --help            show this help message and exit
   -d, --debug           Enable debug output
+  -y, --yes             Do not ask for confirmation
   -v, --verbose         Verbose output
   -t N, --threads N     Number of threads [1]
   -o PATH, --output-path PATH
                         Write output files to this folder [.]
-  -s HASH_SIZE, --hash-size HASH_SIZE
-                        Initial hash size (eg. 10M, 2G) [10M]
-  -k KMER_SIZE, --kmer-size KMER_SIZE
-                        Library kmer size [24]
+  --ascii-base {33,64}  Ascii-encoding base for quality scores [33]
+  --min-quality MIN_QUALITY
+                        Minimum quality before a base position is converted to N
+  --hash-size HASH_SIZE
+                        Initial hash size in generating a library (eg. 10M, 2G) [10M]
+  --kmer-size KMER_SIZE
+                        K-mer size to use in generating a library [24]
   -r FASTQ_FILE, --reads FASTQ_FILE
                         FastQ format reads to use in generating the k-mer library (use multiple times for multiple files)
   -l KMER_LIB, --lib KMER_LIB
                         Output Jellyfish k-mer library base name
-```
-
-#### Usage for BAM mode
-
-```$bash
-usage: qc3C bam [-h] [-d] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] 
-    [--no-html] (-k {phase,arima} | -e NEB_NAME) [-q MIN_MAPQ] -f FASTA -b BAM
-
-Alignment-based analysis.
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -d, --debug           Enable debug output
-  -v, --verbose         Verbose output
-  -t N, --threads N     Number of threads [1]
-  -o PATH, --output-path PATH
-                        Write output files to this folder [.]
-  -p {range (0,1]}, --sample-rate {range (0,1]}
-                        Sample only a proportion of all read-pairs [None]
-  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
-  -M MAX_OBS, --max-obs MAX_OBS
-                        Stop after collecting this many observations
-  --no-json             Do not write a JSON report
-  --no-html             Do not write an HTML report
-  -k {phase,arima}, --library-kit {phase,arima}
-                        Define digest by the commercial library kit used
-  -e NEB_NAME, --enzyme NEB_NAME
-                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
-  -q MIN_MAPQ, --min-mapq MIN_MAPQ
-                        Minimum acceptable mapping quality [60]
-  -f FASTA, --fasta FASTA
-                        Reference sequences
-  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to references
-```
-
-#### Usage for _K_-mer mode
-
-```$bash
-usage: qc3C bam [-h] [-d] [-v] [-t N] [-o PATH] [-p {range (0,1]}] [-s SEED] [-M MAX_OBS] [--no-json] 
-    [--no-html] (-k {phase,arima} | -e NEB_NAME) [-q MIN_MAPQ] -f FASTA -b BAM
-
-Alignment-based analysis.
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -d, --debug           Enable debug output
-  -v, --verbose         Verbose output
-  -t N, --threads N     Number of threads [1]
-  -o PATH, --output-path PATH
-                        Write output files to this folder [.]
-  -p {range (0,1]}, --sample-rate {range (0,1]}
-                        Sample only a proportion of all read-pairs [None]
-  -s SEED, --seed SEED  Random seed used in sampling the read-set [None]
-  -M MAX_OBS, --max-obs MAX_OBS
-                        Stop after collecting this many observations
-  --no-json             Do not write a JSON report
-  --no-html             Do not write an HTML report
-  -k {phase,arima}, --library-kit {phase,arima}
-                        Define digest by the commercial library kit used
-  -e NEB_NAME, --enzyme NEB_NAME
-                        Define digest by explicitly naming up to two case-sensitive NEB enzyme names
-  -q MIN_MAPQ, --min-mapq MIN_MAPQ
-                        Minimum acceptable mapping quality [60]
-  -f FASTA, --fasta FASTA
-                        Reference sequences
-  -b BAM, --bam BAM     Input name-sorted bam file of Hi-C reads mapped to references
 ```
