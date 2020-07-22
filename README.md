@@ -1,14 +1,19 @@
-# qc3C - quality control for Hi-C DNA sequencing libraries
+# qc3C - reference-free quality control for Hi-C DNA sequencing libraries
 
 The aim of qc3C is to provide a means of assessing the proportion of "signal" within a Hi-C sequencing library and thereby judge its quality as experimental data. 
 
-We use "signal" to refer to the proportion of read-pairs which are true products of proximity ligation, rather than pairs that result from undesirable processes that in downstream analysis will constitute the noise in the experiment. 
- 
-To accomplish this, two modes of analysis are available:
+By "signal" we mean the proportion of read-pairs which are true products of proximity ligation rather than pairs resulting from undesirable processes, which in downstream analyses will constitute noise in the experiment. When inferring the proportion of Hi-C pairs, no restriction is made on their separation distance. This is in contrast to reference-based methods which typically look at only the proportion of pairs that map at long-range (e.g. the number of pairs separated by more than 10 kbp). 
+
+Although the proportion of long-range pairs is indeed an important factor, this cannot be established without the use of a reference sequence. The reference requirement is troublesome for any project which does not involve model organisms. Further, in cases where a draft assemblies is available, the degree of assembly fragmentation acts as a negative bias when trying to observe long-range pairs.
+
+Since reference-based assessment can be of interest, qc3C can also perform this type of analysis and provide additional statistics which may be of interest. These include such read-through events, HiCPro style pair categorisation (e.g. dangling-end, self-circle, etc).
+
+## Two modes of analysis
+
+- **_k_-mer mode:** reference-free assessment requiring only a Hi-C read-set. 
 
 - **BAM mode:** conventional assessment requiring read-mapping to a reference.
 
-- **_K_-mer mode:** **reference-free** assessment requiring only a Hi-C read-set. 
 
 ## Installation
 
@@ -53,6 +58,107 @@ pip install git+https://github.com/cerebis/qc3C
 ```
 
 ## Using qc3C
+
+### Quick start
+
+Below is a quick demonstration of how you could invoke qc3C in either _k_-mer or bam mode.
+
+#### Creating a _k_-mer database and then analysing the library
+
+For a Hi-C library created with the 4-cutter enzyme DpnII and a known average insert size of 300 bp.
+
+1. first we create the _k_-mer database with the subcommand `mkdb` using default settings.
+2. the _k_-mer mode analysis is then subsequently run
+```
+qc3C mkdb --reads reads_r1.fq.gz --reads reads_r2.fq.gz --lib kmers.jf
+qc3C kmer --mean-insert 300 --enzyme DpnII --lib kmers.jf --reads reads_r1.fq.gz --reads reads_r2.fq.gz --output-path output
+```
+
+#### Analysing in _k_-mer mode without a pre-existing _k_-mer database
+
+In the following, since no _k_-mer database was specified, qc3C will create it without prompting (`--yes`) before commencing the analysis. The resulting database will be saved to the specified output directory.
+```
+qc3C kmer --yes --mean-insert 300 --enzyme DpnII --reads reads_r1.fq.gz --reads reads_r2.fq.gz -output-path output
+```
+
+#### Analysing in bam mode
+
+Users must first map reads to the chosen reference sequence and create a query-name ordered bam file. We strongly encourage the use bwa mem for the step of mapping. _Note, qc3C currently will not create the bam file for you._
+
+1. first prior to mapping, an index of the reference sequence is created
+2. next, reads are mapped to reference using bwa mem and sorted by query-name
+3. last, bam mode analysis is run
+```
+bwa index ref.fna.gz
+bwa mem -5SP ref.fna.gz reads_r1.fq.gz reads_r2.fq.gz | samtools view -bS - | samtools sort -n -o reads2ref.bam -
+qc3C bam --enzyme DpnII --fasta ref.fna.gz --bam reads2ref.bam --output-path output
+```
+
+#### Results
+
+In each case within the output directory (default is `.`), qc3C will write the analysis results to the console as well as to the log file `qc3C.log`. In addition, a report is written in both JSON and HTML formats, where the HTML report is a very simple conversion of the JSON report to a user-friendly layout, while the JSON report is intended for machine parsing.
+
+To further aid users, we have contributed to the visual report tool [MultiQC](https://github.com/ewels/MultiQC), so that qc3C reports can be inspected in a more visual format. The qc3C reports are automatically recognised by MultiQC.
+
+Using the standard interface of MultiQC, in the output folder as above
+```
+multiqc output
+```
+
+#### _k_-mer mode analysis
+
+Assu
+
+### Defining a library's digest
+
+In either style of analysis, users must tell qc3C which enzymes were used in the DNA digestion step during library generation. This can be accomplished by either specifying these enzyme(s) by name or the commercial kit. Currently only Phase and Arima kits are defined within qc3C.
+
+#### --enzyme (-e)
+
+Enzymes are specified at runtime by their standard case-sensitive names (e.g. `DpnII`, `HindIII`, `Sau3AI`, etc). Specifying any enzyme should be possible, so long as it does not produce blunt ends. Both single and dual enzyme digests are supported, where for dual digests, users simply specify both enzymes (eg `-e Sau3AI -e MluCI`).
+
+**Example kmer mode run for a DpnII digest and a fragment size of 300 bp**
+
+```
+qc3C kmer -m 300 -e DpnII -r reads.fq.gz
+```
+
+**Mistakes in enzyme names**
+
+In the event a user incorrectly spells an enzyme, qc3C will attempt to suggest known ezymes with similar spelling. For instance, if a user was to accidentally use the character `1` rather than capital `I` in the name DpnII.
+
+```
+> qc3C kmer -y -m 300 -e Dpn11 -r mac_qc3C/ecoli_150_0.01.fq.gz 
+
+INFO     | 2020-07-22 11:19:17,662 | qc3C.jellyfish | Beginning library creation
+INFO     | 2020-07-22 11:19:17,663 | qc3C.jellyfish | Requested kmer size: 24
+INFO     | 2020-07-22 11:19:17,663 | qc3C.jellyfish | Input FastQ files: mac_qc3C/ecoli_150_0.01.fq.gz
+INFO     | 2020-07-22 11:19:17,663 | qc3C.jellyfish | Creating library: ./qc3c_kmers.jf
+INFO     | 2020-07-22 11:19:22,097 | qc3C.kmer_based | Random seed was not set, using 54163895
+ERROR    | 2020-07-22 11:19:22,099 |    main | Dpn11 is undefined, but its similar to: DpnII, DpnI
+```
+
+#### --library-kit (-k)
+
+As a convenience, for libraries generated using either Phase or Arima kits, the enzymes can be specified as indirectly.
+
+**Example kmer mode run generate from Phase Genomics library kit and a fragment size of 300 bp**
+```
+qc3C kmer -m 300 -k phase -r reads.fq.gz
+```
+
+#### Cut-site database creation
+
+When run BAM mode, qc3C will first perform an _in silico_ digestion of the reference sequence to produce a cut-site database. For large genomes, this calculation may take a couple of minutes, but afterwards the result will be cached to a file for later reuse.
+
+The cut-site database is saved to and retrieved from the same location as the reference sequence, therefore write access to the directory containing the reference is required.
+
+**qc3C BAM mode run, generating the cut-site database when one does not exist**
+```
+qc3C bam -e DpnII -f reference.fna -b reads2ref.bam
+INFO     | 2020-07-22 13:04:02,942 | qc3C.ligation | No cut-site database cache found for digest involving DpnII
+INFO     | 2020-07-22 13:04:02,965 | qc3C.ligation | Building cut-site database against reference sequence and DpnII
+```
 
 ### Creating A BAM file for QC analysis
 
