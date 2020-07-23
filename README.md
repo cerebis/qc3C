@@ -8,28 +8,22 @@ Although the proportion of long-range pairs is indeed an important attribute, th
 
 Still, details from reference-based assessment remain of interest and therefore qc3C can also perform this type of analysis. What we call "bam mode" analysis. Statistics obtained from this mode include such details as the number of read-through events and HiCPro style pair categorisation (e.g. dangling-end, self-circle, etc).
 
-## Two modes of analysis
-
-- **_k_-mer mode:** reference-free assessment requiring only a Hi-C read-set. 
-
-- **bam mode:** conventional assessment requiring read-mapping to a reference.
-
 ## Installation
 
 ### Requirements
 
-Due to our dependency on Jellyfish, qc3C requires Linux x86_64 to run natively. With that said, we maintain a Docker image which will run on other platforms.
+Due to dependency issues, qc3C currently runs only on the Linux x86_64 platform. With that said, we maintain a Docker image which enables users to run qc3C on other platforms, both in Docker and Singularity.
 
 ### Using Conda
 
-We maintain conda packages for both qc3C and a few supporting packages on the Anaconda channel [cerebis](https://anaconda.org/cerebis). 
+We maintain our own conda packages for both qc3C and a few supporting packages on the Anaconda channel [cerebis](https://anaconda.org/cerebis). 
 
 Installation is accomplished as follows.
 ```
 conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 ``` 
 
-Note: our anaconda channel includes a build of the _k_-mer counting tool Jellyfish with Python language hooks. **Please do not install the bioconda kmer-jellyfish package** as it does not possess language hooks and qc3C will fail to run, throwing `NoModuleFoundError: No module named 'jellyfish'`.
+**Note**: our anaconda channel includes a build of the _k_-mer counting tool Jellyfish, which includes Python language hooks. **Please do not attempt to forcibly install the bioconda kmer-jellyfish package** as it has not been built with any language hooks and qc3C will fail to run, throwing `NoModuleFoundError: No module named 'jellyfish'`. For the curious, this deficiency within the bioconda package likely stems from the official policy to support Linux and OSX, while the language hooks within Jellyfish do not successfully build for OSX.
 
 ### Using Docker
 
@@ -51,7 +45,9 @@ singularity run qc3C.sif
 
 ### From Github
 
-qc3C can be installed directly from github, however this requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, a build which correctly creates the Python hooks is more problematic. To remedy this, users are encouraged to use our Jellyfish conda package, after which qc3C is easily installed using Pip.
+qc3C can be installed directly from github, however this approach requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python language hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, a build which correctly installs the necessary Python hooks can be more problematic. [See Jellyfish issue #134](https://github.com/gmarcais/Jellyfish/issues/134) for more information on how to remedy this issue. 
+
+Instead, we encourage users to dodge this stumbling-block by installing our Jellyfish conda package. Afterwards, qc3C is easily installed using Pip.
 
 **Note:** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, qc3C will fail to run with the error `NoModuleFoundError: No module named 'jellyfish'`. 
 
@@ -64,6 +60,22 @@ pip install git+https://github.com/cerebis/qc3C
 ```
 
 ## Using qc3C
+
+### Modes of analysis
+
+qc3C is capable of quality assessing Hi-C read-sets in two ways. The traditional method, reliant on aligning reads to a reference sequence, and a new reference-free _k_-mer based approach.  
+
+#### Requirements per mode
+
+- **Reference-free _k_-mer mode** 
+  - a Hi-C read-set
+  - mean insert size
+  - the names of the restriction enzymes used in protocol digest 
+
+- **Reference-dependent bam mode**
+  - a Hi-C read-set
+  - a (preferably high quality) reference sequence
+  - the names of the restriction enzymes used in protocol digest
 
 ### Quick start
 
@@ -100,22 +112,40 @@ bwa mem -5SP ref.fna.gz reads_r1.fq.gz reads_r2.fq.gz | samtools view -bS - | sa
 qc3C bam --enzyme DpnII --fasta ref.fna.gz --bam reads2ref.bam --output-path output
 ```
 
-#### Results
+### Results and Output files
 
-In each case within the output directory (default is `.`), qc3C will write the analysis results to the console as well as to the log file `qc3C.log`. In addition, a report is written in both JSON and HTML formats, where the HTML report is a very simple conversion of the JSON report to a user-friendly layout, while the JSON report is intended for machine parsing.
+#### Output location
 
-To further aid users, we have contributed to the visual report tool [MultiQC](https://github.com/ewels/MultiQC), so that qc3C reports can be inspected in a more visual format. The qc3C reports are automatically recognised by MultiQC.
+All files created by qc3C are written to the location specified by the command line option `--output-path [-o]`. 
 
-Using the standard interface of MultiQC, in the output folder as above
+By default is the current directory (`.`).
+
+#### Console and log file
+
+Results from stages of the analysis are directed as they occur to both the console and a log file named qc3C.log. The log file contains detailed information on the input run parameters, as well as the outcome of each step in the analysis. By default, the console output is slightly less verbose but the same level of detail can be obtained with the `--verbose [-v]` switch.
+
+#### Analysis report file
+
+At the end of a run, qc3C writes a full report in both JSON (`report.qc3C.json`) and HTML (`report.qc3C.html`) formats. These files contain the same information as found in the log. The JSON file is intended to ease programmatic access to the analysis results, while the HTML file is intended to provide a basic presentation of the structured report data for users.
+
+#### MultiQC support
+
+To further aid users, we have contributed a qc3C module to [MultiQC](https://github.com/ewels/MultiQC). We encourage users to make use of this program, particularly when inspecting multiple libraries, for the benefits of its interactive and visual representation.
+
+Both analysis modes are supported and reported separately within the MultiQC report.
+
+Using MultiQC
 ```
-multiqc output
+multiqc <analysis-directory>
 ```
+
+[example reports to be added soon]
 
 ### Defining a library's digest
 
 In either style of analysis, users must tell qc3C which enzymes were used in the DNA digestion step during library generation. This can be accomplished by either specifying these enzyme(s) by name or the commercial kit. Currently only Phase and Arima kits are defined within qc3C.
 
-#### --enzyme (-e)
+#### Using `--enzyme` (`-e`)
 
 Enzymes are specified at runtime by their standard case-sensitive names (e.g. `DpnII`, `HindIII`, `Sau3AI`, etc). Specifying any enzyme should be possible, so long as it does not produce blunt ends. Both single and dual enzyme digests are supported, where for dual digests, users simply specify both enzymes (eg `-e Sau3AI -e MluCI`).
 
@@ -140,7 +170,7 @@ INFO     | 2020-07-22 11:19:22,097 | qc3C.kmer_based | Random seed was not set, 
 ERROR    | 2020-07-22 11:19:22,099 |    main | Dpn11 is undefined, but its similar to: DpnII, DpnI
 ```
 
-#### --library-kit (-k)
+#### Using `--library-kit` (`-k`)
 
 As a convenience, for libraries generated using either Phase or Arima kits, the enzymes can be specified as indirectly.
 
@@ -189,14 +219,13 @@ bwa mem -5SP ref.fna.gz hic_reads.fq.gz | samtools view -bS - | samtools sort -n
 
 The state of the reference can range from a completed genome to assembly contigs, but users should keeo in mind that as the reference becomes more fragmented, assessing long-range _cis_-contacts will become increasingly hampered by short references on which to map reads. Further, _trans_-contocts (inter-molecular contacts) cannot be distinguished from those which merely connect broken segments from the same molecule.
 
-
-### Notes on running QC analyses
+### Suggestions on running QC analyses
 
 #### Limit maximum observations
 
 Analysing the entirety of a large read-set is unnecessary to obtain reliable evidence of overall quality. To limit an analysis to a smaller subset, users can specify the maximum total number of observations (`--max-obs`) and/or control acceptance rate `--sample-rate`. In testing, we have found reliable results from 100,000 reads.
 
-#### Accurate insert size in _k_-mer mode
+#### Use an accurate insert size in _k_-mer mode
 
 It is vitally important that an accurate estimate of the insert/fragment size is known. This value should reflect the averae size of the unknown sequence only. In testing, we have found that sequencing facilities can inadvertently quote larger values, which will affect qc3C's adjusted (or extrapolated) signal estimates.
 
