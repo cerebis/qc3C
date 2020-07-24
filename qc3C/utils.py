@@ -50,7 +50,7 @@ def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_si
     """
     frag_mask = np.zeros(insert_len, dtype=np.float)
     read_mask = np.zeros(read_len, dtype=np.float)
-    x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
+    x_min, x_max = kmer_size, read_len - (kmer_size + junc_size)
     # create a read mask that represents the region of the read which can be interrogated
     read_mask[x_min:x_max] = 1
     # create a fragment mask by transferring this silhouette to either end of the fragment
@@ -63,7 +63,7 @@ def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_si
 
 
 def observed_fraction(read_len: int, insert_len: int, method: str,
-                      kmer_size: int = 0, junc_size: int = 0) -> np.ndarray:
+                      kmer_size: int = 0, junc_size: int = 0) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -74,7 +74,7 @@ def observed_fraction(read_len: int, insert_len: int, method: str,
     :param method: "additive" or "binary" determines how the mean of the mask is calculated.
     :param kmer_size: the requested k-mer size
     :param junc_size: the junction size
-    :return: additive covering mask of the fragment for experimental conditions
+    :return: estimated fraction of extent observed depending on method
     """
     if method == 'additive':
         return make_observable_mask(read_len, insert_len, kmer_size, junc_size).mean()
