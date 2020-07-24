@@ -764,9 +764,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         # TODO for multi-digests with varying length ligation products, using the longest
         #   will lead to overestimating the observered fraction. This could be calculated as
         #   a weighted sum over abundance of each possible junction.
-        obs_frag_mask = observed_fraction(int(mean_read_len), mean_insert, k_size, digest.longest_junction())
-        # consider with overlaps have occured which leads to double counting
-        obs_frac = obs_frag_mask.mean()
+        obs_frac = observed_fraction(round(mean_read_len), round(mean_insert), 'additive',
+                                     k_size, digest.longest_junction())
         if 1 - obs_frac < 0:
             logger.warning('Read-pairs have sampling overlap due to small fragment size')
             logger.warning('Significant pair overlap poses double-counting risk, '

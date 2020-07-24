@@ -10,8 +10,7 @@ import subprocess
 from hashlib import sha256
 
 from json2html import json2html
-from scipy.stats import beta
-from typing import Optional, TextIO, Dict, Tuple
+from typing import Optional, TextIO, Dict
 from typing.re import Pattern as tPattern
 from mimetypes import guess_type
 from .exceptions import ApplicationException
@@ -38,76 +37,33 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     return obs_extent / (mean_frag_size * n_fragments)
 
 
-# def observed_extent_new(obs_table, insert_len, read_len, kmer_size, junc_size):
-#
-#     def _make_observable_mask(read_len: int, insert_len: int, kmer_size: int,
-#                              junc_size: int) -> np.ndarray:
-#         """
-#         Use a mask to calculate the proportion of a fragment which can be interrogated
-#         due to the need for a sliding window around any observed junction sequence.
-#
-#         :param read_len: the average read-length
-#         :param insert_len: the average insert (or fragment) length
-#         :param kmer_size: the requested k-mer size
-#         :param junc_size: the junction size
-#         :param is_single: the observational set has been reduced to a single read per fragment
-#         :return:
-#         """
-#
-#         frag_mask = np.zeros(insert_len, dtype=np.uint8)
-#         read_mask = np.zeros(read_len, dtype=np.uint8)
-#         x_min, x_max = kmer_size , read_len - (kmer_size + junc_size )
-#         # create a read mask that represents the region of the read which can be interrogated
-#         read_mask[x_min:x_max] = 1
-#         # create a fragment mask by transferring this silhouette to either end of the fragment
-#         # handling the edge-case where the insert length is less than the read length
-#         a = read_len if read_len < insert_len else insert_len
-#         frag_mask[:a] += read_mask[:a]
-#         frag_mask[-a:] += read_mask[::-1][-a:]
-#         # return the fragment mask
-#         return frag_mask
-#
-#     n_junc_reads = len(obs_table[obs_table.has_junc == True])
-#     n_nojunc_reads = len(obs_table[obs_table.has_junc == False])
-#     logger.debug('Read count: with junc {}, without junc {}'.format(n_junc_reads, n_nojunc_reads))
-#     n_junc_frags = len(set(obs_table[obs_table.has_junc == True].seq))
-#     n_nojunc_frags = len(set(obs_table[obs_table.has_junc == False].seq))
-#     logger.debug('Frag count: with junc {}, without junc {}'.format(n_junc_frags, n_nojunc_frags))
-#
-#     # junc_cover = (_make_observable_mask(read_len, insert_len, kmer_size, junc_size) > 0).sum()
-#     # nojunc_cover = (_make_observable_mask(read_len, insert_len, 0, 0) > 0).sum()
-#     junc_cover = _make_observable_mask(read_len, insert_len, kmer_size, junc_size).sum()
-#     nojunc_cover = (_make_observable_mask(read_len, insert_len, 0, 0) > 0).sum()
-#     logger.debug('Insert coveraege: with junc {} without junc {}'.format(junc_cover, nojunc_cover))
-#
-#     junc_redunancy = n_junc_reads / n_junc_frags / 2
-#     nojunc_redunancy = n_nojunc_reads / n_nojunc_frags / 2
-#     logger.debug('Read to frag redunancy: with junc {} without junc {}'.format(junc_redunancy, nojunc_redunancy))
-#
-#     junc_obs_frac = junc_redunancy * junc_cover
-#     nojunc_obs_frac = nojunc_redunancy * nojunc_cover
-#     logger.debug('Observed fractions: with junc {} without junc {}'.format(junc_obs_frac, nojunc_obs_frac))
-#
-#     average_obs_frac = (junc_obs_frac * n_junc_frags + nojunc_obs_frac * n_nojunc_frags) / \
-#                        (insert_len * (n_junc_frags + n_nojunc_frags))
-#     logger.debug('Average combined obs frac: {}'.format(average_obs_frac))
-#
-#     # sanity checks that should not get invoked
-#     if average_obs_frac < 0:
-#         logger.warning('Estimate for observed fraction < 0, resetting to 0.')
-#         average_obs_frac = 0
-#
-#     if 1 - average_obs_frac < 0:
-#         logger.warning('Read-pairs have significant overlap due to small fragment size')
-#         severe_overlap = True
-#     else:
-#         logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
-#                     .format(insert_len, 1 - average_obs_frac))
-#         severe_overlap = False
-#
-#     return average_obs_frac, severe_overlap
+def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_size: int) -> np.ndarray:
+    """
+    Use a mask to calculate the proportion of a fragment which can be interrogated
+    due to the need for a sliding window around any observed junction sequence.
 
-def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0, junc_size: int = 0) -> np.ndarray:
+    :param read_len: the average read-length
+    :param insert_len: the average insert (or fragment) length
+    :param kmer_size: the requested k-mer size
+    :param junc_size: the junction size
+    :return:
+    """
+    frag_mask = np.zeros(insert_len, dtype=np.float)
+    read_mask = np.zeros(read_len, dtype=np.float)
+    x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
+    # create a read mask that represents the region of the read which can be interrogated
+    read_mask[x_min:x_max] = 1
+    # create a fragment mask by transferring this silhouette to either end of the fragment
+    # handling the edge-case where the insert length is less than the read length
+    a = read_len if read_len < insert_len else insert_len
+    frag_mask[:a] += read_mask[:a]
+    frag_mask[-a:] += read_mask[::-1][-a:]
+    # return the fragment mask
+    return frag_mask
+
+
+def observed_fraction(read_len: int, insert_len: int, method: str,
+                      kmer_size: int = 0, junc_size: int = 0) -> np.ndarray:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -115,43 +71,31 @@ def observed_fraction(read_len: int, insert_len: int, kmer_size: int = 0, junc_s
 
     :param read_len: the average read-length
     :param insert_len: the average insert (or fragment) length
+    :param method: "additive" or "binary" determines how the mean of the mask is calculated.
     :param kmer_size: the requested k-mer size
     :param junc_size: the junction size
     :return: additive covering mask of the fragment for experimental conditions
     """
-
-    def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_size: int) -> np.ndarray:
-        """
-        Use a mask to calculate the proportion of a fragment which can be interrogated
-        due to the need for a sliding window around any observed junction sequence.
-
-        :param read_len: the average read-length
-        :param insert_len: the average insert (or fragment) length
-        :param kmer_size: the requested k-mer size
-        :param junc_size: the junction size
-        :return:
-        """
-
-        frag_mask = np.zeros(insert_len, dtype=np.float)
-        read_mask = np.zeros(read_len, dtype=np.float)
-        x_min, x_max = kmer_size + 1, read_len - (kmer_size + junc_size + 1)
-        # create a read mask that represents the region of the read which can be interrogated
-        read_mask[x_min:x_max] = 1
-        # create a fragment mask by transferring this silhouette to either end of the fragment
-        # handling the edge-case where the insert length is less than the read length
-        a = read_len if read_len < insert_len else insert_len
-        frag_mask[:a] += read_mask[:a]
-        frag_mask[-a:] += read_mask[::-1][-a:]
-        # return the fragment mask
-        return frag_mask
-
-    # TODO this function is currently trivial but will remain as I expect to refine this critical step
-    read_len = round(read_len)
-    insert_len = round(insert_len)
-    return make_observable_mask(read_len, insert_len, kmer_size, junc_size)
+    if method == 'additive':
+        return make_observable_mask(read_len, insert_len, kmer_size, junc_size).mean()
+    elif method == 'binary':
+        return (make_observable_mask(read_len, insert_len, kmer_size, junc_size) > 0).mean()
+    else:
+        raise ApplicationException('unknown method {}'.format(method))
 
 
-def count_sequences(file_name: str, fmt: str, max_cpu: int = 1) -> int:
+def clean_output(msg: bytes):
+    """
+    Convert bytes to string and strip ends.
+    :param msg: the bytes message to decode and strip
+    :return: str version of message.
+    """
+    if msg is None:
+        return ''
+    return msg.decode().strip()
+
+
+def count_sequences(file_name: str, fmt: str, max_cpu: int = 1, wait_timeout: float = None) -> int:
     """
     Estimate the number of fasta or fastq sequences in a file by counting headers. Decompression
     is automatically attempted for files ending in .gz. Counting and decompression is by
@@ -171,22 +115,38 @@ def count_sequences(file_name: str, fmt: str, max_cpu: int = 1) -> int:
     else:
         raise ApplicationException('sequence format {} is unknown'.format(fmt))
 
+    if not os.path.exists(file_name):
+        raise FileNotFoundError(file_name)
+
+    if max_cpu < 1:
+        raise ApplicationException('max_cpus must 1 or greater')
+
+    if wait_timeout is not None and wait_timeout <= 0:
+        raise ApplicationException('wait_timeout must be None or greater than 0')
+
     if file_name.endswith('.gz'):
-        pigz_path = test_for_exe('pigz')
+        pigz_path = check_executable_exists('pigz')
         if max_cpu > 1 and pigz_path is not None:
             proc_uncomp = subprocess.Popen([pigz_path, '-p{}'.format(max_cpu), '-cd', file_name],
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
             proc_uncomp = subprocess.Popen(['gzip', '-cd', file_name],
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc_read = subprocess.Popen(['grep', pattern], stdin=proc_uncomp.stdout, stdout=subprocess.PIPE)
+        proc_grep = subprocess.Popen(['grep', '-c', pattern], stdin=proc_uncomp.stdout, stdout=subprocess.PIPE)
     else:
-        proc_read = subprocess.Popen(['grep', pattern, file_name], stdout=subprocess.PIPE)
+        proc_grep = subprocess.Popen(['grep', '-c', pattern, file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    n = 0
-    for _ in proc_read.stdout:
-        n += 1
-    return n
+    # wait for the process to complete and then pull the results in with communicate
+    retval = proc_grep.wait(wait_timeout)
+    outs, errs = proc_grep.communicate()
+
+    if retval > 1:
+        # grep returns 1 when there are no matching lines, therefore only raise
+        # errors on values larger.
+        raise OSError('retval=[{}] stdout=[{}] stderr=[{}]'.format(
+            retval, clean_output(outs), clean_output(errs)))
+
+    return int(outs)
 
 
 def modification_hash(file_path: str) -> str:
@@ -236,7 +196,7 @@ def warn_if(_test: bool) -> int:
         return logging.INFO
 
 
-def test_for_exe(prog_name: str) -> Optional[str]:
+def check_executable_exists(prog_name: str) -> Optional[str]:
     """
     Test whether a program exists on the system. This can be either a full path
     or just the executable name. This is case sensitive.

@@ -38,6 +38,7 @@ setuptools.setup(
         'pandas',
         'psutil',
         'pysam',
+        'pytest',
         'scipy',
         'simplejson',
         'tqdm'

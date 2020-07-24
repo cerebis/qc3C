@@ -7,6 +7,7 @@ numpy
 pandas
 psutil
 pysam
+pytest
 scipy
 simplejson
 tqdm
