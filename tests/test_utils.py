@@ -16,9 +16,9 @@ def test_simple_observed_fraction(obs_frac, mean_frag_size):
 
 @pytest.mark.parametrize('exc_class,file_path,fmt,ncpu,wait_timeout',
                          [(FileNotFoundError, 'foobar', 'fasta', 1, None),
-                          (ApplicationException, 'data/10seq.fa', 'foobar', 1, None),
-                          (ApplicationException, 'data/10seq.fa', 'fasta', -1, None),
-                          (ApplicationException, 'data/10seq.fa', 'fasta', 1, 0)])
+                          (ApplicationException, 'tests/data/10seq.fa', 'foobar', 1, None),
+                          (ApplicationException, 'tests/data/10seq.fa', 'fasta', -1, None),
+                          (ApplicationException, 'tests/data/10seq.fa', 'fasta', 1, 0)])
 def test_count_sequences_exceptions(exc_class, file_path, fmt, ncpu, wait_timeout):
     # Exercise and verify
     with pytest.raises(exc_class):
@@ -26,12 +26,12 @@ def test_count_sequences_exceptions(exc_class, file_path, fmt, ncpu, wait_timeou
 
 
 @pytest.mark.parametrize("nseq,file_path,fmt,ncpu",
-                         [(10, 'data/10seq.fa', 'fasta', 1),
-                          (10, 'data/10seq.fq', 'fastq', 1),
-                          (10, 'data/10seq.fa.gz', 'fasta', 1),
-                          (10, 'data/10seq.fq.gz', 'fastq', 1),
-                          (10, 'data/10seq.fa', 'fasta', 2),
-                          (10, 'data/10seq.fa.gz', 'fasta', 2)])
+                         [(10, 'tests/data/10seq.fa', 'fasta', 1),
+                          (10, 'tests/data/10seq.fq', 'fastq', 1),
+                          (10, 'tests/data/10seq.fa.gz', 'fasta', 1),
+                          (10, 'tests/data/10seq.fq.gz', 'fastq', 1),
+                          (10, 'tests/data/10seq.fa', 'fasta', 2),
+                          (10, 'tests/data/10seq.fa.gz', 'fasta', 2)])
 def test_count_sequences(nseq, file_path, fmt, ncpu):
     # Exercise and verify
     assert count_sequences(file_path, fmt, ncpu) == nseq
