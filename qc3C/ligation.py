@@ -177,7 +177,7 @@ class Digest(object):
         elif kmer_type == 'vestigial':
             return collections.OrderedDict({vi: 0 for vi in self.unambiguous_vestigial()})
         else:
-            raise ValueError(f'unsupported kmer_type {kmer_type}')
+            raise ValueError('unsupported kmer_type {}'.format(kmer_type))
 
     @staticmethod
     def gather_tracker(tracker: Dict['Digest.DerivedString', int]) -> Dict[str, Dict[str, int]]:
