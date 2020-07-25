@@ -796,7 +796,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         for _e, _counts in digest.gather_tracker(junction_tracker).items():
             for _j, _n in _counts.items():
                 logger.info('For {} junction sequence {} found: {}'.format(_e, _j, _n))
-                report['junction_frequency'][f'{_e} {_j}'] = _n
+                report['junction_frequency']['{} {}'.format(_e, _j)] = _n
 
         # combine them together
         if output_table is not None:

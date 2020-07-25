@@ -96,7 +96,7 @@ class Digest(object):
             _junctions = {}
             for a, b in itertools.product(enz_list, repeat=2):
                 # the actual sequence
-                _junc_seq = f'{a.end5}{a.overhang}{b.overhang}{b.end3}'
+                _junc_seq = '{}{}{}{}'.format(a.end5, a.overhang, b.overhang, b.end3)
                 if _junc_seq not in _junctions:
                     _vest_seq = vestigial_site(a.enzyme, _junc_seq)
                     _junctions[_junc_seq] = ligation_info(str(a.enzyme), str(b.enzyme),
@@ -267,7 +267,7 @@ class Digest(object):
         elif object_type == 'cutsite':
             return {k: v._asdict() for k, v in self.cutsites.items()}
         else:
-            raise ValueError(f'unsupported object_type {object_type}')
+            raise ValueError('unsupported object_type {}'.format(object_type))
 
 
 def digest_sequence(seq: SeqRecord, enzymes: List[EnzymeType], linear: bool = True) -> np.ndarray:

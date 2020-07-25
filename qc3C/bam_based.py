@@ -914,13 +914,13 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     for _e, _counts in digest.gather_tracker(junction_tracker).items():
         for _j, _n in _counts.items():
             logger.info('For {} junction sequence {} found: {}'.format(_e, _j, _n))
-            report['junction_frequency'][f'{_e} {_j}'] = _n
+            report['junction_frequency']['{} {}'.format(_e, _j)] = _n
 
     report['remnant_frequency'] = {}
     for _e, _counts in digest.gather_tracker(vestigial_tracker).items():
         for _v, _n in _counts.items():
             logger.info('For {} cutsite remnant {} found: {}'.format(_e, _v, _n))
-            report['remnant_frequency'][f'{_e} {_v}'] = _n
+            report['remnant_frequency']['{} {}'.format(_e, _v)] = _n
 
     # write all pair separations to a file
     # np.savetxt('pair_separations.txt', np.array(pair_separations, dtype=np.int), fmt='%d')

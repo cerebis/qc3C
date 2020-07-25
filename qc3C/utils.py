@@ -266,7 +266,7 @@ def write_jsonline(fpath: str, obj, suffix='jsonl', append=True):
     :param append: True append to existing files, False overwrite
     """
     if not fpath.endswith(suffix):
-        fpath = f'{fpath}.{suffix}'
+        fpath = '{}.{}'.format(fpath, suffix)
     _mode = 'at+' if append else 'at'
     with open(fpath, _mode) as fp:
         print(to_json_string(obj), file=fp)
@@ -280,7 +280,7 @@ def write_html_report(fpath: str, report: Dict):
     :param report: a qc3C report dictionary
     """
     if not fpath.endswith(".html"):
-        fpath = f'{fpath}.html'
+        fpath = '{}.html'.format(fpath)
     with open(fpath, 'wt') as fp:
         fp.write("""
             <!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
