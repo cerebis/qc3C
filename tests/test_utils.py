@@ -88,6 +88,7 @@ def test_modification_hash(tmp_path):
     b_file.write_text('some contents')
     bytes_hash = modification_hash(b_file.as_posix())
 
+    # added a sleep to deal with systems using low-resolution time stamps
     time.sleep(1)
     a_file.touch()
     mtime_hash = modification_hash(a_file.as_posix())
