@@ -39,6 +39,7 @@ setuptools.setup(
         'psutil',
         'pysam',
         'pytest',
+        'pytest-mock',
         'scipy',
         'simplejson',
         'tqdm'

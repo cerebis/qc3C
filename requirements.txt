@@ -8,6 +8,7 @@ pandas
 psutil
 pysam
 pytest
+pytest-mock
 scipy
 simplejson
 tqdm

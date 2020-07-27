@@ -1,5 +1,6 @@
 from qc3C.utils import *
 import pytest
+from pytest_mock import mocker
 
 
 @pytest.mark.parametrize('obs_frac, mean_frag_size',
@@ -67,3 +68,11 @@ def test_observed_fraction(obs_frac, read_len, insert_len, method, kmer_size, ju
 def test_observed_fraction_exceptions(exc_class, method):
     with pytest.raises(exc_class):
         observed_fraction(10, 20, method, 0, 0)
+
+
+@pytest.mark.parametrize('_out, _in',
+                         [('foobar', b'foobar'),
+                          ('foobar', b' foobar\n'),
+                          ('', None)])
+def test_clean_output(_out, _in):
+    assert _out == clean_output(_in)
