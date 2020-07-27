@@ -161,8 +161,8 @@ def main():
                                           conflict_handler='resolve', description='Kmer-based analysis.')
     cmd_kmer.add_argument('--ascii-base', default=33, choices=[33, 64], type=int,
                           help='Ascii-encoding base for quality scores [33]')
-    cmd_kmer.add_argument('--min-quality', default=10, type=int, action=UniqueStore,
-                          help='Minimum quality before a base position is converted to N')
+    cmd_kmer.add_argument('--min-quality', default=5, type=int, action=UniqueStore,
+                          help='Minimum quality before a base position is converted to N [5]')
     cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
     cmd_kmer.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
@@ -248,6 +248,9 @@ def main():
 
         if args.command == 'mkdb':
 
+            if args.min_quality < 0:
+                parser.error('argument --min-quality: must be greater than zero')
+
             mk_database(make_lib_path(args), args.reads, args.kmer_size, args.hash_size,
                         args.ascii_base, args.min_quality, args.threads)
 
@@ -261,6 +264,9 @@ def main():
 
         # Kmer based analysis
         elif args.command == 'kmer':
+
+            if args.min_quality < 0:
+                parser.error('argument --min-quality: must be greater than zero')
 
             read_paths = [os.path.realpath(fi) for fi in args.reads]
             if len(set(read_paths)) != len(read_paths):

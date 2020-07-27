@@ -654,15 +654,14 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
     logger.info('Number of reads filtered [low coverage]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('low_cov'),
                         analysis_counter.fraction('low_cov') * 100))
+    logger.warning('There were {:,} ({:#.4g}% of analyzed) reads filtered due to gaps in k-mer coverage.'
+                   .format(analysis_counter.count('zero_cov'),
+                           analysis_counter.fraction('zero_cov') * 100))
 
     # this might not be needed generally.
-    if analysis_counter.count('zero_cov') > 0:
-        logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
-        logger.warning('There were {:,} ({:#.4g}% of analyzed) reads filtered due to no k-mer coverage.'
-                       .format(analysis_counter.count('zero_cov'),
-                               analysis_counter.fraction('zero_cov') * 100))
-        logger.warning('This suggests the k-mer library was not created from the supplied read-set.')
-        logger.warning('* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *')
+    if analysis_counter.fraction('zero_cov') > 0.1:
+        logger.warning('Excessive gaps in coverage can lead to low estimates. Consider reducing "--min-quality" '
+                       'or check that reads and library match')
 
     try:
         # handle event that no reads passed through parsing.
@@ -767,10 +766,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         obs_frac = observed_fraction(round(mean_read_len), round(mean_insert), 'additive',
                                      k_size, digest.longest_junction())
         if 1 - obs_frac < 0:
-            logger.warning('Read-pairs have sampling overlap due to small fragment size')
-            logger.warning('Significant pair overlap poses double-counting risk, '
-                           'consider merging pairs for quality analysis')
-            logger.warning('Unobserved fraction will be reported as 0')
+            logger.warning('Small fragment size can lead to double-counting due to read-pair overlap')
+            logger.warning('Observed fraction exceeds 1 ({:#.4g}), therefore unobserved will be reported as 0'
+                           .format(obs_frac))
             report['unobs_fraction'] = 0
         else:
             logger.info('For supplied insert length of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
