@@ -1,7 +1,7 @@
 from qc3C.utils import *
 import pytest
 import shutil
-
+import time
 
 @pytest.mark.parametrize('obs_frac, mean_frag_size',
                          [(0.25, 600),
@@ -88,6 +88,7 @@ def test_modification_hash(tmp_path):
     b_file.write_text('some contents')
     bytes_hash = modification_hash(b_file.as_posix())
 
+    time.sleep(1)
     a_file.touch()
     mtime_hash = modification_hash(a_file.as_posix())
 
