@@ -1,6 +1,6 @@
 from qc3C.utils import *
 import pytest
-from pytest_mock import mocker
+import shutil
 
 
 @pytest.mark.parametrize('obs_frac, mean_frag_size',
@@ -76,3 +76,26 @@ def test_observed_fraction_exceptions(exc_class, method):
                           ('', None)])
 def test_clean_output(_out, _in):
     assert _out == clean_output(_in)
+
+
+def test_modification_hash(tmp_path):
+    # Set Up and execise
+    a_file = tmp_path / 'file.txt'
+    a_file.write_text('some contents')
+    initial_hash = modification_hash(a_file.as_posix())
+
+    b_file = tmp_path / 'other_file.txt'
+    b_file.write_text('some contents')
+    bytes_hash = modification_hash(b_file.as_posix())
+
+    a_file.touch()
+    mtime_hash = modification_hash(a_file.as_posix())
+
+    c_file = tmp_path / 'copied_file.txt'
+    shutil.copy2(a_file.as_posix(), c_file.as_posix())
+    same_hash = modification_hash(c_file.as_posix())
+
+    # Verify
+    assert initial_hash != mtime_hash
+    assert initial_hash != bytes_hash
+    assert initial_hash != same_hash
