@@ -6,17 +6,18 @@ import psutil
 
 from typing import List
 from qc3C.exceptions import ApplicationException
+from qc3C.utils import guess_quality_encoding
 
 logger = logging.getLogger(__name__)
 
 
-def mk_database(db_path: str, fasta_files: List[str], kmer_size: int, hash_size: int,
-                ascii_base: int = 33, min_qual: int = 10, threads: int = 1):
+def mk_database(db_path: str, fastq_files: List[str], kmer_size: int, hash_size: int,
+                ascii_base: int = None, min_qual: int = 10, threads: int = 1):
     """
     Create a Jellyfish kmer database from the supplied fasta files.
 
     :param db_path: output database path
-    :param fasta_files: input fasta file list
+    :param fastq_files: input FastQ file list
     :param kmer_size: k-mer size
     :param ascii_base: Ascii-base for quality score encoding  (33 new encoding, 64 old encoding)
     :param min_qual: Minimum acceptable base quality or position converted to N
@@ -27,11 +28,18 @@ def mk_database(db_path: str, fasta_files: List[str], kmer_size: int, hash_size:
     if re.fullmatch(r'[0-9]+[mMgG]', hash_size) is None:
         raise ValueError('invalid hash_size format supplied')
 
+    # guess the quality encoding if not specified
+    if ascii_base is None:
+        ascii_base = guess_quality_encoding(fastq_files[0])
+        logger.info('Guessed FastQ quality encoding is: {}'.format(ascii_base))
+    else:
+        logger.info('User specified FastQ quality encoding is: {}'.format(ascii_base))
+
     with tempfile.NamedTemporaryFile(mode='wt') as gen_h:
 
         # Satisfy jellyfish's strange generator file input method for
         # multiple fasta file (R1/R2) support.
-        for fn in fasta_files:
+        for fn in fastq_files:
             gen_h.write('zcat -f {}\n'.format(fn))
         # make sure the buffer is flushed to disk
         gen_h.flush()
@@ -39,7 +47,7 @@ def mk_database(db_path: str, fasta_files: List[str], kmer_size: int, hash_size:
         try:
             logger.info('Beginning library creation')
             logger.info('Requested kmer size: {}'.format(kmer_size))
-            logger.info('Input FastQ files: {}'.format(' '.join(fasta_files)))
+            logger.info('Input FastQ files: {}'.format(' '.join(fastq_files)))
             logger.info('Creating library: {}'.format(db_path))
             p = subprocess.Popen(['jellyfish', 'count',
                                   '--quality-start', str(ascii_base),

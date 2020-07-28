@@ -300,3 +300,66 @@ def write_html_report(fpath: str, report: Dict):
         _html_table = json2html.convert(to_json_string(report), table_attributes='', escape=True)
         fp.write('        {}\n'.format(_html_table))
         fp.write("    </body>\n</html>")
+
+
+def guess_quality_encoding(fastq_path: str, n_reads: int = 1000) -> int:
+    """
+    Look at a sample of reads within a FastQ format file, to guess
+    whether its encoding begins at 33 or 64. The more reads inspected
+    the greater the odds that one will contain low enough qualities
+    to demonstrate that it is base-33.
+    :param fastq_path: the path to the FastQ format file
+    :param n_reads: the number of reads to inspect
+    :return: 33 if base-33, 64 if base-64
+    """
+    with open_input(fastq_path) as in_h:
+        for n, (_id, _seq, _qual) in enumerate(read_seq(in_h), 1):
+            if sum(1 for b in _qual.encode() if b < 64) > 0:
+                return 33
+            if n == n_reads:
+                break
+    return 64
+
+
+def read_seq(fp: TextIO) -> (str, str, Optional[str]):
+    """
+    Method to quickly read FastA or FastQ files using a generator function.
+    Originally sourced from https://github.com/lh3/readfq
+    :param fp: input file object
+    :return: tuple
+    """
+    last = None  # this is a buffer keeping the last unprocessed line
+
+    while True:  # mimic closure; is it a bad idea?
+        if not last:  # the first record or a record following a fastq
+            for l in fp:  # search for the start of the next record
+                if l[0] in '>@':  # fasta/q header line
+                    last = l[:-1]  # save this line
+                    break
+        if not last:
+            break
+
+        name, seqs, last = last[1:].partition(" ")[0], [], None
+        for l in fp:  # read the sequence
+            if l[0] in '@+>':
+                last = l[:-1]
+                break
+            seqs.append(l[:-1])
+
+        if not last or last[0] != '+':  # this is a fasta record
+            yield name, ''.join(seqs), None  # yield a fasta record
+            if not last:
+                break
+
+        else:  # this is a fastq record
+            seq, leng, seqs = ''.join(seqs), 0, []
+            for l in fp:  # read the quality
+                seqs.append(l[:-1])
+                leng += len(l) - 1
+                if leng >= len(seq):  # have read enough quality
+                    last = None
+                    yield name, seq, ''.join(seqs)  # yield a fastq record
+                    break
+            if last:  # reach EOF before reading enough quality
+                yield name, seq, None  # yield a fasta record instead
+                break

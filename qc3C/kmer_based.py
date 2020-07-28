@@ -6,12 +6,12 @@ import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple, OrderedDict, defaultdict
+from collections import namedtuple, OrderedDict
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import write_jsonline, count_sequences, write_html_report, observed_fraction
+from qc3C.utils import write_jsonline, count_sequences, write_html_report, observed_fraction, read_seq
 from qc3C._version import runtime_info
 
 try:
@@ -110,50 +110,6 @@ def open_input(file_name: str) -> TextIO:
         return gzip.open(file_name, 'rt')
     else:
         return open(file_name, 'rt')
-
-
-def read_seq(fp: TextIO) -> (str, str, Optional[str]):
-    """
-    Method to quickly read FastA or FastQ files using a generator function.
-    Originally sourced from https://github.com/lh3/readfq
-    :param fp: input file object
-    :return: tuple
-    """
-    last = None  # this is a buffer keeping the last unprocessed line
-
-    while True:  # mimic closure; is it a bad idea?
-        if not last:  # the first record or a record following a fastq
-            for l in fp:  # search for the start of the next record
-                if l[0] in '>@':  # fasta/q header line
-                    last = l[:-1]  # save this line
-                    break
-        if not last:
-            break
-
-        name, seqs, last = last[1:].partition(" ")[0], [], None
-        for l in fp:  # read the sequence
-            if l[0] in '@+>':
-                last = l[:-1]
-                break
-            seqs.append(l[:-1])
-
-        if not last or last[0] != '+':  # this is a fasta record
-            yield name, ''.join(seqs), None  # yield a fasta record
-            if not last:
-                break
-
-        else:  # this is a fastq record
-            seq, leng, seqs = ''.join(seqs), 0, []
-            for l in fp:  # read the quality
-                seqs.append(l[:-1])
-                leng += len(l) - 1
-                if leng >= len(seq):  # have read enough quality
-                    last = None
-                    yield name, seq, ''.join(seqs)  # yield a fastq record
-                    break
-            if last:  # reach EOF before reading enough quality
-                yield name, seq, None  # yield a fasta record instead
-                break
 
 
 def assign_empirical_pvalues_all(_df):
@@ -654,7 +610,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
     logger.info('Number of reads filtered [low coverage]: {:,} ({:#.4g}% of analysed)'
                 .format(analysis_counter.count('low_cov'),
                         analysis_counter.fraction('low_cov') * 100))
-    logger.warning('There were {:,} ({:#.4g}% of analyzed) reads filtered due to gaps in k-mer coverage.'
+    logger.warning('Number of reads filtered [zero coverage]: {:,} ({:#.4g}% of analyzed)'
                    .format(analysis_counter.count('zero_cov'),
                            analysis_counter.fraction('zero_cov') * 100))
 

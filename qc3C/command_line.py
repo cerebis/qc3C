@@ -120,7 +120,7 @@ def main():
     parser.add_argument('-V', '--version', default=False, action='store_true', help='Version')
 
     command_parsers = parser.add_subparsers(title='commands', dest='command', description='Valid commands',
-                                       help='choose an analysis stage for further options')
+                                            help='choose an analysis stage for further options')
     command_parsers.required = False
 
     """
@@ -128,8 +128,8 @@ def main():
     """
     cmd_mkdb = command_parsers.add_parser('mkdb', parents=[global_parser],
                                           description='Create kmer database.')
-    cmd_mkdb.add_argument('--ascii-base', default=33, choices=[33, 64], type=int,
-                          help='Ascii-encoding base for quality scores [33]')
+    cmd_mkdb.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
+                          help='Ascii-encoding base for quality scores [guessed]')
     cmd_mkdb.add_argument('--min-quality', default=10, type=int, action=UniqueStore,
                           help='Minimum quality before a base position is converted to N')
     cmd_mkdb.add_argument('--hash-size', default='10M', action=UniqueStore,
@@ -159,8 +159,8 @@ def main():
     """
     cmd_kmer = command_parsers.add_parser('kmer', parents=[global_parser, analysis_parser],
                                           conflict_handler='resolve', description='Kmer-based analysis.')
-    cmd_kmer.add_argument('--ascii-base', default=33, choices=[33, 64], type=int,
-                          help='Ascii-encoding base for quality scores [33]')
+    cmd_kmer.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
+                          help='Ascii-encoding base for quality scores [guessed]')
     cmd_kmer.add_argument('--min-quality', default=5, type=int, action=UniqueStore,
                           help='Minimum quality before a base position is converted to N [5]')
     cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
