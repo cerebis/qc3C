@@ -37,21 +37,21 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     return obs_extent / (mean_frag_size * n_fragments)
 
 
-def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_size: int) -> np.ndarray:
+def make_observable_mask(read_len: int, insert_len: int, left_margin: int, right_margin: int) -> np.ndarray:
     """
     Use a mask to calculate the proportion of a fragment which can be interrogated
     due to the need for a sliding window around any observed junction sequence.
 
     :param read_len: the average read-length
     :param insert_len: the average insert (or fragment) length
-    :param kmer_size: the requested k-mer size
-    :param junc_size: the junction size
+    :param left_margin: left-side margin which cannot be observed due to algorithm constraints
+    :param right_margin: right-side margin which cannot observed due to algorithm constraints
     :return:
     """
-    frag_mask = np.zeros(insert_len, dtype=np.float)
-    read_mask = np.zeros(read_len, dtype=np.float)
-    x_min, x_max = kmer_size, read_len - (kmer_size + junc_size)
+    frag_mask = np.zeros(insert_len, dtype=np.int)
+    read_mask = np.zeros(read_len, dtype=np.int)
     # create a read mask that represents the region of the read which can be interrogated
+    x_min, x_max = left_margin, read_len - right_margin
     read_mask[x_min:x_max] = 1
     # create a fragment mask by transferring this silhouette to either end of the fragment
     # handling the edge-case where the insert length is less than the read length
@@ -63,7 +63,7 @@ def make_observable_mask(read_len: int, insert_len: int, kmer_size: int, junc_si
 
 
 def observed_fraction(read_len: int, insert_len: int, method: str,
-                      kmer_size: int = 0, junc_size: int = 0) -> float:
+                      left_margin: int = 0, right_margin: int = 0) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
     the sequenced fragments for Hi-C junctions. Additionally, the k-mer and junction size affect
@@ -72,14 +72,14 @@ def observed_fraction(read_len: int, insert_len: int, method: str,
     :param read_len: the average read-length
     :param insert_len: the average insert (or fragment) length
     :param method: "additive" or "binary" determines how the mean of the mask is calculated.
-    :param kmer_size: the requested k-mer size
-    :param junc_size: the junction size
+    :param left_margin: left-side margin which cannot be observed due to algorithm constraints
+    :param right_margin: right-side margin which cannot observed due to algorithm constraints
     :return: estimated fraction of extent observed depending on method
     """
     if method == 'additive':
-        return make_observable_mask(read_len, insert_len, kmer_size, junc_size).mean()
+        return make_observable_mask(read_len, insert_len, left_margin, right_margin).mean()
     elif method == 'binary':
-        return (make_observable_mask(read_len, insert_len, kmer_size, junc_size) > 0).mean()
+        return (make_observable_mask(read_len, insert_len, left_margin, right_margin) > 0).mean()
     else:
         raise ApplicationException('unknown method {}'.format(method))
 

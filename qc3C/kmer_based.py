@@ -267,7 +267,6 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
             _junc_seq = _match.group()
             tracker[_junc_seq] += 1
             # only report sites which meet flank constraints
-            # elif k_size <= _ix <= (seq_len - (k_size + site_size)):
             if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
                 yield _seq, _ix, _id, seq_len, _junc_len, _junc_seq
             else:
@@ -720,7 +719,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         #   will lead to overestimating the observered fraction. This could be calculated as
         #   a weighted sum over abundance of each possible junction.
         obs_frac = observed_fraction(round(mean_read_len), round(mean_insert), 'additive',
-                                     k_size, digest.longest_junction())
+                                     k_size + 1, k_size + digest.longest_junction() + 1)
         if 1 - obs_frac < 0:
             logger.warning('Small fragment size can lead to double-counting due to read-pair overlap')
             logger.warning('Observed fraction exceeds 1 ({:#.4g}), therefore unobserved will be reported as 0'
