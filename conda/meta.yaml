@@ -1,5 +1,5 @@
 {% set name = "qc3C" %}
-{% set version = "v0.5rc1" %}
+{% set version = "v0.5rc5" %}
 
 package:
   name: "{{ name|lower }}"
@@ -7,7 +7,7 @@ package:
 
 source:
   git_url: "https://github.com/cerebis/{{ name }}.git"
-  sha256: 68adc6dede8e57deb4b3f1443240e140445436221e566d8da13d7173b13e921c
+  sha256: 6d3b9bb7c21270a6681be3bad8343db5642ad520198d31a2df9b503b39c0efdd
 
 build:
   number: 0
@@ -43,6 +43,17 @@ requirements:
 test:
   imports:
     - qc3C
+  source_files:
+    - tests/test_utils.py
+    - tests/data/10seq.fa
+    - tests/data/10seq.fa.gz
+    - tests/data/10seq.fq
+    - tests/data/10seq.fq.gz
+    - tests/data/test.fq.gz
+  requires:
+    - pytest
+  commands:
+    - pytest tests
 
 about:
   home: "https://github.com/cerebis/qc3C"
@@ -56,4 +67,3 @@ about:
 extra:
   recipe-maintainers:
     - cerebis
-
