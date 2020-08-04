@@ -216,7 +216,7 @@ class Counter(ABC):
 class ReadFilter(Counter):
 
     def __init__(self, sample_rate: float, min_mapq: int, min_reflen: int, min_match: int,
-                 no_secondary: bool, no_supplementary: bool, no_refterm: bool,
+                 no_secondary: bool, no_supplementary: bool, no_refterm: bool, no_duplicate: bool,
                  ref_lengths, random_state: np.random.RandomState = None):
         """
         Filter reads based on a number of criteria, maintaining counts of the various categorisations.
@@ -228,11 +228,12 @@ class ReadFilter(Counter):
         :param no_secondary: reject secondary alignments
         :param no_supplementary: reject supplementary alignments
         :param no_refterm: reject alignments which terminate early due to reaching the end of the reference
+        :param no_duplicate: reject alignments in which the pair has been identified as a duplicate
         :param ref_lengths: a list of all reference lengths
         :param random_state: an optional random state required for sub-sampling
         """
         super().__init__({'mapq': 0, 'sample': 0, 'ref_len': 0, 'secondary': 0,
-                          'supplementary': 0, 'weak': 0, 'ref_term': 0})
+                          'supplementary': 0, 'duplicate': 0, 'weak': 0, 'ref_term': 0})
         self.sample_rate = sample_rate
         self.min_mapq = min_mapq
         self.min_reflen = min_reflen
@@ -240,6 +241,7 @@ class ReadFilter(Counter):
         self.no_secondary = no_secondary
         self.no_supplementary = no_supplementary
         self.no_refterm = no_refterm
+        self.no_duplicate = no_duplicate
         self.ref_lengths = ref_lengths
         if random_state is not None:
             self.unif = random_state.uniform
@@ -281,6 +283,9 @@ class ReadFilter(Counter):
             _accept = False
         if self.no_supplementary and r.is_supplementary:
             self._counts['supplementary'] += 1
+            _accept = False
+        if self.no_duplicate and r.is_duplicate:
+            self._counts['duplicate'] += 1
             _accept = False
 
         # only test for the following conditions if the read alignment has passed earlier tests
@@ -349,7 +354,7 @@ class read_pairs(object):
     def __init__(self, bam_path: str, random_state: np.random.RandomState = None, sample_rate: float = None,
                  min_mapq: int = None, min_reflen: int = None, min_match: int = None, no_trans: bool = False,
                  no_secondary: bool = False, no_supplementary: bool = False, no_refterm: bool = False,
-                 threads: int = 1, count_reads: bool = False, show_progress: bool = False,
+                 no_duplicate: bool = False, threads: int = 1, count_reads: bool = False, show_progress: bool = False,
                  is_ipynb: bool = False):
         """
         An iterator over the pairs in a bam file, with support for the 'with' statement.
@@ -367,6 +372,7 @@ class read_pairs(object):
         :param no_secondary: reject secondary alignments
         :param no_supplementary: reject supplementary alignments
         :param no_refterm: reject reads which terminate early due to reaching the end of a reference
+        :param no_duplicate: reject reads in which the pair has been identified as a duplicate
         :param threads: the number of concurrent threads when accessing the bam file
         :param count_reads: before starting, count the number of alignments in the bam file
         :param show_progress: display progress using tqdm
@@ -400,7 +406,7 @@ class read_pairs(object):
             pair_sample_rate = sample_rate ** 0.5
 
         self.read_filter = ReadFilter(pair_sample_rate, min_mapq, min_reflen, min_match,
-                                      no_secondary, no_supplementary, no_refterm,
+                                      no_secondary, no_supplementary, no_refterm, no_duplicate,
                                       self.reference_lengths, random_state)
         self.pair_filter = PairFilter(no_trans=no_trans)
 
@@ -530,7 +536,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     pair_parser = read_pairs(bam_file, random_state=random_state, sample_rate=sample_rate,
                              min_mapq=min_mapq, min_match=1, min_reflen=500,
                              no_trans=False, no_secondary=True, no_supplementary=True, no_refterm=True,
-                             threads=threads, count_reads=count_reads, show_progress=show_progress)
+                             no_duplicate=True, threads=threads, count_reads=count_reads, show_progress=show_progress)
 
     startswith_cutsite = digest.cutsite_searcher('startswith')
     startswith_junction = digest.junction_searcher('startswith')
@@ -696,6 +702,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
         'n_ref_len': pair_parser.read_filter.count('ref_len'),
         'n_secondary': pair_parser.read_filter.count('secondary'),
         'n_supplementary': pair_parser.read_filter.count('supplementary'),
+        'n_duplicate': pair_parser.read_filter.count('duplicate'),
         'n_weak_mapping': pair_parser.read_filter.count('weak'),
         'n_ref_term': pair_parser.read_filter.count('ref_term'),
         'n_analysed_pairs': pair_parser.pair_filter.analysed(),
@@ -751,6 +758,9 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     logger.info('Number of reads filtered [ref terminated]: {:,} ({:#.4g}% of analysed)'
                 .format(pair_parser.read_filter.count('ref_term'),
                         pair_parser.read_filter.fraction('ref_term') * 100))
+    logger.info('Number of reads filtered [duplicate]: {:,} ({:#.4g}% of analysed)'
+                .format(pair_parser.read_filter.count('duplicate'),
+                        pair_parser.read_filter.fraction('duplicate') * 100))
 
     # accepted reads
     logger.info('Number of accepted reads: {:,} ({:#.4g}% of analysed)'
