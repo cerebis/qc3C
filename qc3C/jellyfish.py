@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def mk_database(db_path: str, fastq_files: List[str], kmer_size: int, hash_size: int,
-                ascii_base: int = None, min_qual: int = 10, threads: int = 1):
+                ascii_base: int = None, min_qual: int = 5, threads: int = 1):
     """
     Create a Jellyfish kmer database from the supplied fasta files.
 
@@ -25,13 +25,16 @@ def mk_database(db_path: str, fastq_files: List[str], kmer_size: int, hash_size:
     :param threads: number of concurrent threads
     """
 
+    if min_qual is None:
+        min_qual = 0
+
     if re.fullmatch(r'[0-9]+[mMgG]', hash_size) is None:
         raise ValueError('invalid hash_size format supplied')
 
     # guess the quality encoding if not specified
     if ascii_base is None:
         ascii_base = guess_quality_encoding(fastq_files[0])
-        logger.info('Guessed FastQ quality encoding is: {}'.format(ascii_base))
+        logger.info('Inferred FastQ quality encoding from sampled reads: {}'.format(ascii_base))
     else:
         logger.info('User specified FastQ quality encoding is: {}'.format(ascii_base))
 
@@ -46,6 +49,7 @@ def mk_database(db_path: str, fastq_files: List[str], kmer_size: int, hash_size:
 
         try:
             logger.info('Beginning library creation')
+            logger.info('Requested minimum quality: {}'.format(min_qual))
             logger.info('Requested kmer size: {}'.format(kmer_size))
             logger.info('Input FastQ files: {}'.format(' '.join(fastq_files)))
             logger.info('Creating library: {}'.format(db_path))

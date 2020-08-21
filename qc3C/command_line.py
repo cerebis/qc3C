@@ -130,7 +130,7 @@ def main():
                                           description='Create kmer database.')
     cmd_mkdb.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
                           help='Ascii-encoding base for quality scores [guessed]')
-    cmd_mkdb.add_argument('--min-quality', default=10, type=int, action=UniqueStore,
+    cmd_mkdb.add_argument('--min-quality', default=5, type=int, action=UniqueStore,
                           help='Minimum quality before a base position is converted to N')
     cmd_mkdb.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
@@ -161,7 +161,7 @@ def main():
                                           conflict_handler='resolve', description='Kmer-based analysis.')
     cmd_kmer.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
                           help='Ascii-encoding base for quality scores [guessed]')
-    cmd_kmer.add_argument('--min-quality', default=5, type=int, action=UniqueStore,
+    cmd_kmer.add_argument('--min-quality', default=None, type=int, action=UniqueStore,
                           help='Minimum quality before a base position is converted to N [5]')
     cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
@@ -265,7 +265,7 @@ def main():
         # Kmer based analysis
         elif args.command == 'kmer':
 
-            if args.min_quality < 0:
+            if args.min_quality is not None and args.min_quality < 0:
                 parser.error('argument --min-quality: must be greater than zero')
 
             read_paths = [os.path.realpath(fi) for fi in args.reads]
@@ -284,6 +284,8 @@ def main():
                 if not build_lib:
                     raise ApplicationException('A k-mer library is required to proceed')
             else:
+                if args.min_quality is not None:
+                    parser.error('argument --min-quality: currently not supported when library already exists')
                 build_lib = False
 
             if build_lib:

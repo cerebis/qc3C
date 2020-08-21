@@ -76,6 +76,10 @@ def observed_fraction(read_len: int, insert_len: int, method: str,
     :param right_margin: right-side margin which cannot observed due to algorithm constraints
     :return: estimated fraction of extent observed depending on method
     """
+    logger.debug('Parameters to unobserved fraction: read_len: {} insert_len: {} '
+                 'method: {} left_margin: {} right_margin: {}'.format(
+        read_len, insert_len, method, left_margin, right_margin))
+
     if method == 'additive':
         return make_observable_mask(read_len, insert_len, left_margin, right_margin).mean()
     elif method == 'binary':
