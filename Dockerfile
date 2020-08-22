@@ -10,9 +10,7 @@ LABEL org.label-schema.vcs-ref="d5d263cb92b08198545770720a6d044312140f98"
 LABEL org.label-schema.version="0.5rc6"
 LABEL org.label-schema.docker.cmd="docker run -v /path/to/data:/app cerebis/qc3c kmer -y -m 210 -e DpnII -r reads.fq.gz"
 
-RUN conda config --set channel_priority strict && \
-     conda install --yes -c cerebis -c conda-forge -c bioconda qc3c "python<3.8" && \
-	 conda clean -afy
+RUN conda install --yes -c cerebis -c conda-forge -c bioconda qc3c "python<3.8" && conda clean -afy
 
 RUN mkdir -p /app
 WORKDIR /app
