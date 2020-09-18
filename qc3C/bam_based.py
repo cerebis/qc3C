@@ -854,7 +854,7 @@ def analyse(enzyme_names: List[str], bam_file: str, fasta_file: str,
     if emp_median is None:
         logger.warning('Unobserved fraction not estimated as insert size was not available')
     else:
-        obs_frac = observed_fraction(int(round(mean_read_len)), int(round(emp_median)), 'binary',
+        obs_frac = observed_fraction(int(round(mean_read_len)), int(round(emp_median)), 'binary', True,
                                      right_margin=digest.longest_junction())
         logger.info('For observed insert size of {:.0f}nt, estimated unobserved fraction: {:#.4g}'
                     .format(emp_median, 1 - obs_frac))

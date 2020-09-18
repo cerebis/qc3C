@@ -39,6 +39,7 @@ setuptools.setup(
         'psutil',
         'pysam',
         'pytest',
+        'recordclass',
         'scipy',
         'simplejson',
         'tqdm'

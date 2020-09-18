@@ -1,17 +1,19 @@
 import bz2
 import gzip
+import numba as nb
 import numpy as np
 import pandas
 import subprocess
 import tqdm
 import logging
 
-from collections import namedtuple, OrderedDict
+from collections import OrderedDict
+from recordclass import make_dataclass, asdict
 from scipy.stats import gmean
 from typing import TextIO, Optional, Dict, List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import write_jsonline, count_sequences, write_html_report, observed_fraction, read_seq
+from qc3C.utils import write_jsonline, count_sequences, write_html_report, read_seq
 from qc3C._version import runtime_info
 
 try:
@@ -21,8 +23,156 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+CovInfo = make_dataclass('cov_info',
+                         [('mean_inner', float), ('mean_outer', float), ('has_junc', bool), ('read_pos', int),
+                          ('seq_hash', int), ('obs_extent', int), ('obs_count', int), ('is_merged', bool)])
 
-CovInfo = namedtuple('cov_info', ['mean_inner', 'mean_outer', 'has_junc', 'read_pos', 'seq', 'read_len', 'junc_seq'])
+OBS_ARRAY_DTYPE = np.dtype([('ratio', np.float64), ('has_junc', np.uint8),
+                            ('seq_hash', np.int64), ('obs_extent', np.uint64), ('is_merged', np.bool)])
+
+
+@nb.jit(nopython=True)
+def obs_fraction(obs, insert_size):
+    """
+    Calculate the fraction of insert extent that has been observed in this set of observations.
+    For merged reads, the extent is considered full observed, while we compare the cumulative extent
+    of unmerged pairs against the mean insert size.
+    """
+    obs_sum = 0
+    tot_sum = 0
+    for i in range(obs.shape[0]):
+        _oi = obs['obs_extent'][i]
+        if obs['is_merged'][i]:
+            obs_sum += _oi
+            tot_sum += _oi
+        else:
+            obs_sum += _oi
+            tot_sum += insert_size
+    return obs_sum / tot_sum
+
+
+@nb.jit(nopython=True, cache=True)
+def empirical_fraction(obs, insert_size):
+    """
+    Calculate an estimate for the empirical fraction from an array of observations. The array contains
+    k-mer frequency observations for both those which had junctions and those which did not. Those
+    without define our empirical p-values for the null hypothesis.
+
+    :param obs: the table of observations
+    :return: an scalar estimates for the empirical Hi-C fraction, its variance and the observed fraction
+    """
+    # separate obs with and without junctions
+    wj_ratios = np.sort(obs[obs['has_junc'] == 1]['ratio'])
+    nj_ratios = np.sort(obs[obs['has_junc'] == 0]['ratio'])
+
+    # empirical p-values are generated from only unique (no junc) observations
+    uniq_ratios = np.unique(nj_ratios)
+    max_n = len(uniq_ratios)
+    emp_pvals = np.linspace(0, 1, max_n + 3)[2:-1]
+
+    # assign p-values to obs containing junctions, where ratio dictates p-value
+    wj_pvals = np.zeros_like(wj_ratios)
+    n = 0
+    for i in range(len(uniq_ratios)):
+        while n < len(wj_ratios) and wj_ratios[n] <= uniq_ratios[i]:
+            wj_pvals[n] = emp_pvals[i]
+            n += 1
+        if n >= len(wj_ratios):
+            break
+
+    # for cases when we have additional with-junc obs,
+    # these get assigned the largest value we have at our disposal
+    for i in range(n, len(wj_ratios)):
+        wj_pvals[i] = emp_pvals[-1]
+
+    # n_fragments = len(np.unique(obs['seq_hash']))
+    n_fragments = len(obs)
+
+    q = 1 - wj_pvals
+    return q.sum() / n_fragments, np.sqrt((q * (1-q)).sum()) / n_fragments, obs_fraction(obs, insert_size)
+
+
+def dataframe_to_array(_df: pandas.DataFrame):
+    """
+    Extract a numpy array of the necessary columns for estimating the observed fraction
+    :param _df: dataframe of observations
+    :return: numpy array
+    """
+    _obs_arr = _df.loc[:, ['ratio', 'has_junc', 'seq_hash', 'obs_extent', 'is_merged']].values
+    _obs_arr = np.array([(_obs_arr[i, 0], _obs_arr[i, 1], _obs_arr[i, 2], _obs_arr[i, 3], _obs_arr[i, 4])
+                         for i in range(_obs_arr.shape[0])], OBS_ARRAY_DTYPE)
+    return _obs_arr
+
+
+class BootstrapFraction(object):
+
+    def __init__(self, _df: pandas.DataFrame, _n_samples: int, _frac: float,
+                 _insert_size: int, _min_size: int, _seed: int):
+        """
+        A bootstrapping analysis of the set of junction k-mer frequency observations.
+
+        :param _df: the table of observations, both with and without junctions
+        :param _n_samples: the number of bootstrap samples to use in estimation
+        :param _frac: the fraction of the total observations to use per bootstrap
+        :param _insert_size: the expected size of inserts
+        :param _min_size: the minimum sample size
+        :param _seed: a random seed.
+        """
+
+        self.obs_arr = dataframe_to_array(_df)
+        self.num_obs = len(self.obs_arr)
+        self.insert_size = _insert_size
+        self.seed = _seed
+        self.sample_size = int(self.num_obs * _frac)
+        if self.sample_size < _min_size:
+            logger.debug('Observation pool is small, limiting sample size to {}'.format(_min_size))
+            self.sample_size = _min_size
+        self.random_state = np.random.RandomState(_seed)
+
+        # compute the bootstrap estimates, storing in an array
+        self.estimates = np.zeros((_n_samples, 3), dtype=np.float)
+        self.extents = np.zeros(_n_samples, dtype=np.int)
+        for i in tqdm.tqdm(range(_n_samples), desc='Bootstrapping CI'):
+            _smpl = self._take_sample()
+            self.extents[i] = _smpl['obs_extent'].sum()
+            self.estimates[i, :] = empirical_fraction(_smpl, self.insert_size)
+
+    def _take_sample(self):
+        """
+        Take a sample from the pool of observations using the sampling
+        characteristics defined at instantiation.
+        :return: the sample array
+        """
+        return self.obs_arr[self.random_state.choice(self.num_obs, size=self.sample_size, replace=True)]
+
+    def summary(self) -> Tuple[float, float, float]:
+        """
+        Basic summary statistics for the computed set of estimates.
+        :return: mean, std, median
+        """
+        return self.estimates[:, 0].mean(), self.estimates[:, 0].std(), np.median(self.estimates[:, 0])
+
+    def confidence(self, conf_width: float = 0.95) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Confidence interval for the set of computed estimates, returning both raw and adjusted estimations
+        :param conf_width: confidence interval width (default 95%)
+        :return: low and high quantiles for both raw and adjusted for unobserved extent
+        """
+        assert 0 < conf_width < 1, 'Confidence interval width must be between 0 and 1.'
+        _q = 0.5 * (1 - conf_width)
+        _raw = np.quantile(self.estimates[:, 0], q=[_q, 1-_q])
+        _obs_frac = np.quantile(self.estimates[:, 2], q=[_q, 1-_q])
+        _adj = _raw * 1 / _obs_frac
+        return _raw, _adj
+
+    def obs_frac(self) -> float:
+        """
+        Calculate the mean observed extent over the samples
+        :return: observed fraction
+        """
+        return self.estimates[:, 2].mean()
+        # estimated_total_extent = self.sample_size * self.insert_size
+        # return self.extents.mean() / estimated_total_extent
 
 
 class Counter(object):
@@ -112,67 +262,6 @@ def open_input(file_name: str) -> TextIO:
         return open(file_name, 'rt')
 
 
-def assign_empirical_pvalues_all(_df):
-    _cols = ['ratio', 'pvalue', 'has_junc', 'read_len', 'seq']
-
-    # get the observations which did not contain a junction
-    # these are our cases where the NULL hypothesis is true
-    # NOTE as has_junc is categorical, we must use a logical comparison
-    _no_junc = _df.loc[_df.has_junc == False, _cols].values
-    _no_junc[:, 1] = -1
-
-    # reduce this to the set of unique ratios. The returned
-    # ratios are implicitly sorted in ascending order
-    _uniq_ratios, _inv_index = np.unique(_no_junc[:, 0], return_inverse=True)
-
-    # The number of unique ratios determines the set of p-values.
-    # we use linspace sampler as means of calculating p(r,N) = (r+1)/(N+1)
-    _pvals = np.linspace(0, 1, num=_uniq_ratios.shape[0] + 2)[2:]
-
-    # reassign these pvalues using the inverse index
-    _no_junc[:, 1] = _pvals[_inv_index]
-
-    # now extract the obs which did contain the junction,
-    # we will next distribute the empirical p-values
-    _out = _df.loc[_df.has_junc, _cols].values
-    _out[:, 1] = -1
-
-    # join both tables and reorder by ascending ratio
-    _out = np.vstack([_no_junc, _out])
-    _out = _out[np.argsort(_out[:, 0]), ]
-
-    # distribute the smallest non-zero adjacent pvalue to those which are zero
-    last_pval = _pvals[0]
-    for i in range(0, _out.shape[0]):
-        if _out[i, 1] < 0:
-            _out[i, 1] = last_pval
-        else:
-            last_pval = _out[i, 1]
-
-    # remake the full table
-    return pandas.DataFrame(_out, columns=_cols)
-
-
-def pvalue_expectation(df: pandas.DataFrame) -> Dict[str, float]:
-    """
-    Calculate the mean p-value and variation for Hi-C observations. Junctionless observations
-    are assigned a p-value of 0.
-    :param df: the dataframe to analyse
-    :return: a tuple of p-value mean and error
-    """
-    # number of total observations
-    # n_obs = len(df)
-    # Hi-C q = 1 - p-value
-    q = 1 - df.loc[df.has_junc, 'pvalue'].to_numpy(np.float)
-
-    # mean value and error
-    n_frag_obs = len(set(df.seq))
-    _mean = q.sum() / n_frag_obs
-    _err = np.sqrt((q * (1-q)).sum()) / n_frag_obs
-
-    return {'mean': _mean, 'error': _err}
-
-
 def get_kmer_size(filename: str) -> int:
     """
     Retrieve the k-mer size used in a library by reading the first record.
@@ -187,7 +276,7 @@ def get_kmer_size(filename: str) -> int:
     return k_size
 
 
-def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -> int:
+def get_kmer_frequency_summary(filename: str, q: float = 0.9, threads: int = 1) -> Tuple[int, float]:
     """
     Get a cutoff value for high frequency kmers by calling out to Jellyfish.
     The external call produces a histogram of kmer frequency, from which Pandas is used to
@@ -201,8 +290,10 @@ def get_kmer_frequency_cutoff(filename: str, q: float = 0.9, threads: int = 1) -
     proc = subprocess.Popen(['jellyfish', 'histo', '-t{}'.format(threads), filename],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        max_cov = pandas.read_csv(proc.stdout, sep=' ', names=['cov', 'count'])['cov'].quantile(q=q)
-        return round(float(max_cov))
+        kmer_histo = pandas.read_csv(proc.stdout, sep=' ', names=['cov', 'count'])
+        max_cov = kmer_histo['cov'].quantile(q=q)
+        mean_cov = (kmer_histo['cov'] * kmer_histo['count']).sum() / kmer_histo['count'].sum()
+        return round(float(max_cov)), mean_cov
     except Exception as e:
         raise RuntimeError('Encountered a problem while analyzing kmer distribution. [{}]'.format(e))
 
@@ -214,6 +305,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
                                                             Optional[int],
                                                             str,
                                                             int,
+                                                            bool,
                                                             Optional[int],
                                                             Optional[str]]:
     """
@@ -229,12 +321,12 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
     :param tracker: a tracker for junction kmer types
     :param no_user_limit: a user limit has not been set
     :param random_state: random state for subsampling
-    :return: yield tuple of (sequence, site position, read id, seq length, junc length, junc seq)
+    :return: yield tuple of (sequence, site position, read id, seq length, is_merged, junc length, junc seq)
     """
     reader = read_seq(open_input(filename))
     unif = random_state.uniform
 
-    for _id, _seq, _qual in reader:
+    for _id, _desc, _seq, _qual in reader:
 
         counts['all'] += 1
         if no_user_limit:
@@ -255,12 +347,15 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
         # search for the site
         _seq = _seq.upper()
 
+        # simple test for fastp merged reads
+        _is_merged = 'merged_' in _desc
+
         # TODO this (and previous approach) only matches the first instance of the site within the read.
         #  There is no reason that this would be the correct location.
         _match = searcher(_seq)
         # no site found
         if _match is None:
-            yield _seq, None, _id, seq_len, None, None
+            yield _seq, None, _id, seq_len, _is_merged, None, None
         else:
             _ix, _end = _match.span()
             _junc_len = _end - _ix
@@ -268,9 +363,27 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
             tracker[_junc_seq] += 1
             # only report sites which meet flank constraints
             if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
-                yield _seq, _ix, _id, seq_len, _junc_len, _junc_seq
+                yield _seq, _ix, _id, seq_len, _is_merged, _junc_len, _junc_seq
             else:
                 counts['flank'] += 1
+
+        # _match_iter = searcher(_seq)
+        # while True:
+        #     _match = next(_match_iter, None)
+        #     if _match is None:
+        #         yield _seq, None, _id, seq_len, _is_merged, None, None
+        #         break
+        #     _ix, _end = _match.span()
+        #     _junc_len = _end - _ix
+        #     _junc_seq = _match.group()
+        #     tracker[_junc_seq] += 1
+        #     # only report sites which meet flank constraints
+        #     if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
+        #         yield _seq, _ix, _id, seq_len, _is_merged, _junc_len, _junc_seq
+        #         break
+        #     else:
+        #         counts['flank'] += 1
+        #         break
 
 
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_insert: int,
@@ -298,30 +411,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
     :param frac_sample: the fraction of observations to use per-bootstrap
     """
 
-    def extract_sample(_df: pandas.DataFrame, _frac: float, _min_n: int, _max_n: int,
-                       _rs: np.random.RandomState) -> pandas.DataFrame:
-        """
-        Extract a sample from a larger table, where random selection is upon fragment id. This
-        maintains pairs across the sampling process.
-        :param _df: the larger dataframe to select from
-        :param _frac: the desired fraction of obs to take in a sample
-        :param _min_n: minimum number of obs to take in a sample
-        :param _max_n: maximum number of obs to take in a sample
-        :param _rs: a numpy random state
-        :return: the sampled dataframe
-        """
-        n_sample = int(len(_df) * _frac)
-        if n_sample < _min_n:
-            logger.debug('Observation pool is small, limiting sample size to {}'.format(_min_n))
-            n_sample = _min_n
-        if n_sample > _max_n:
-            logger.debug('Observation pool is large, limiting sample size to {}'.format(_max_n))
-            n_sample = _max_n
-
-        ix = np.unique(_rs.choice(_df.seq, size=n_sample))
-        return _df.set_index('seq').loc[ix].reset_index()
-
-    def collect_coverage(seq: str, ix: int, site_size: int, k: int) -> (float, float):
+    def collect_coverage(seq: str, ix: int, site_size: int, k: int, min_cov: float) -> (float, float):
         """
         Collect the k-mer coverage centered around the position ix. From the left, the sliding
         window begins just before the site region and slides right until just after. Means
@@ -330,6 +420,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         :param ix: the position marking the beginning of a junction or any other arbitrary location if so desired
         :param site_size: the size of the junction site
         :param k: the kmer size
+        :param min_cov: minimum accepted coverage for outer
         :return: mean(inner), mean(outer)
         """
         def get_kmer_cov(mer: str) -> float:
@@ -358,13 +449,10 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
             si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
             inner[i+1] = get_kmer_cov(si)
             if outer[i+1] == 0 or outer[i+4] == 0 or inner[i+1] == 0:
-                # print("OL", si, outer[i+1], seq)
-                # print("OR", si, outer[i+4], seq)
-                # print("IN", si, inner[i+1], seq)
                 raise ZeroCoverageException()
 
         cov_inner, cov_outer = gmean(inner), gmean(outer)
-        if cov_outer < 1:
+        if cov_outer < min_cov:
             raise LowCoverageException()
         return cov_inner, cov_outer
 
@@ -391,9 +479,16 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
 
     logger.info('Found a k-mer size of {}nt for the Jellyfish library at {}'.format(k_size, kmer_db))
 
-    max_coverage = get_kmer_frequency_cutoff(kmer_db, max_freq_quantile, threads)
+    max_coverage, mean_coverage = get_kmer_frequency_summary(kmer_db, max_freq_quantile, threads)
     logger.info('Maximum k-mer frequency of {} at quantile {} in Jellyfish library {}'
                 .format(max_coverage, max_freq_quantile, kmer_db))
+    # A rule of thumb min threshold
+    min_coverage = mean_coverage - 0.25 * mean_coverage
+    if min_coverage < 1:
+        # no less than 1, which is pedantic as later we don't accept zero-coverage k-mers anyhow
+        min_coverage = 1
+    logger.info('Mean k-mer frequency from Jellyfish library: {:.2f}'.format(mean_coverage))
+    logger.info('Minimum acceptable local k-mer frequency: {:.2f}'.format(min_coverage))
 
     for li in digest.junctions.values():
         # some sanity checks.
@@ -447,7 +542,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         progress = tqdm.tqdm(total=n_reads)
 
     analysis_counter = Counter()
-    coverage_obs = []
+    coverage_obs = {}
 
     any_site_match = digest.cutsite_searcher('startswith')
     junction_tracker = digest.tracker('junction')
@@ -470,7 +565,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
             while True:
 
                 try:
-                    seq, ix, _id, seq_len, junc_len, junc_seq = next(fq_reader)
+                    seq, ix, _id, seq_len, is_merged, junc_len, junc_seq = next(fq_reader)
                 except StopIteration:
                     break
 
@@ -488,8 +583,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                     #  but will only affect Arima currently
                     junc_len = longest_site
 
-                    # try to find a randomly selected region which does not contain
-                    # ambiguous bases. Skip the read if we fail in a few attempts
+                    # randomly select a region which does not contain ambiguous bases,
+                    # but give-up after a few failed attempts
                     _attempts = 0
                     while _attempts < 3:
                         ix = randint(k_size + 1, seq_len - (k_size + longest_site))
@@ -515,7 +610,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                         continue
 
                 try:
-                    mean_inner, mean_outer = collect_coverage(seq, ix, junc_len, k_size)
+                    mean_inner, mean_outer = collect_coverage(seq, ix, junc_len, k_size, min_coverage)
                 except ZeroCoverageException:
                     analysis_counter.counts['zero_cov'] += 1
                     continue
@@ -523,7 +618,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                     analysis_counter.counts['low_cov'] += 1
                     continue
 
-                # avoid regions with pathologically high coverage
+                # avoid regions with strangely high coverage
                 if mean_inner > max_coverage or mean_outer > max_coverage:
                     analysis_counter.counts['high_cov'] += 1
                     continue
@@ -535,8 +630,25 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
 
                 cumulative_length += seq_len
 
-                # record this observation
-                coverage_obs.append(CovInfo(mean_inner, mean_outer, has_junc, ix, _id, seq_len, junc_seq))
+                # unobservable region of any inspected read (left and right ends)
+                flank_size = k_size + 1 + k_size + junc_len + 1
+
+                # if this is a new fragment, record the observation
+                if _id not in coverage_obs:
+                    coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, hash(_id),
+                                                seq_len - flank_size, 1, is_merged)
+                # otherwise always supersede preexisting non-junc obs
+                # or for junc obs flip a coin to choose which obs to keep
+                else:
+                    # we must always record the additional observed extent
+                    _ci = coverage_obs[_id]
+                    assert not _ci.is_merged, 'Merged sequence appears more than once!'
+                    _ci.obs_extent += seq_len - flank_size
+                    _ci.obs_count += 1
+                    if not _ci.has_junc or randint(2) == 0:
+                        # replace obs
+                        coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, hash(_id),
+                                                    _ci.obs_extent, _ci.obs_count, is_merged)
 
                 if max_obs is not None and analysis_counter.accepted() >= sampled_obs[n]:
                     break
@@ -573,6 +685,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                        'seed': seed,
                        'sample_rate': sample_rate,
                        'max_coverage': max_coverage,
+                       'mean_coverage': mean_coverage,
+                       'min_coverage': min_coverage,
                        'mean_insert': mean_insert,
                        'max_freq_quantile': max_freq_quantile,
                        'max_obs': max_obs,
@@ -629,7 +743,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                             analysis_counter.fraction('accepted') * 100))
 
         # lets do some tabular munging, making sure that our categories are explicit
-        all_df = pandas.DataFrame(coverage_obs)
+        # all_df = pandas.DataFrame(np.hstack(coverage_obs.values()))
+        all_df = pandas.DataFrame(map(asdict, coverage_obs.values()))
         # make the boolean explicitly categorical so that a count of zero can be returned below
         all_df['has_junc'] = pandas.Categorical(all_df.has_junc, categories=[True, False])
 
@@ -645,7 +760,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         n_with_junc, n_without_junc = all_df.groupby('has_junc').size().sort_values(ascending=True)
         report['n_without_junc'] = n_without_junc
         report['n_with_junc'] = n_with_junc
-        logger.info('Break down of accepted reads: without junction {:,} with junction {:,}'
+        logger.info('Break down of fragment observations: without junction {:,} with junction {:,}'
                     .format(n_without_junc, n_with_junc))
         if n_without_junc == 0:
             raise InsufficientDataException('No reads without the junction sequence were observed.')
@@ -658,7 +773,6 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
 
         # k-mer coverage ratio. inner (junction region) vs outer (L+R flanking regions)
         all_df['ratio'] = all_df.mean_inner / all_df.mean_outer
-        all_df['pvalue'] = None
 
         report['cs_start'] = starts_with_cutsite
         logger.info('Number of accepted reads starting with a cut site: {:,} ({:#.4g}% of accepted)'
@@ -674,52 +788,43 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                     .format(sum(1 / 4 ** li.junc_len for li in digest.junctions.values()) * 100))
 
         # the total number of read observations
-        n_read_obs = len(all_df)
+        n_read_obs = all_df.obs_count.sum()
         # the number of unique sequence ids is assumed to be the number of fragment observations
-        n_frag_obs = len(set(all_df.seq))
+        n_frag_obs = len(all_df)
         logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
 
-        if n_read_obs == n_frag_obs:
-            logger.warning('Equal number of fragments and reads! Hi-C is expected to be paired.')
+        # if n_read_obs == n_frag_obs:
+        #     logger.warning('Equal number of fragments and reads! Hi-C is expected to be paired.')
         obs_redundancy = n_read_obs / n_frag_obs
-        logger.info('Fragment observational redundancy: {:.4g}'.format(obs_redundancy))
+        logger.info('Fragment observational redundancy (read obs per fragment): {:.4g}'.format(obs_redundancy))
 
-        if n_read_obs < 500 or n_frag_obs < 500:
-            # Single estimation for a small observation pool
-            small_pool = True
-            logger.warning('The number of observations was small, bootstrapping will not be performed')
-            _est = pvalue_expectation(assign_empirical_pvalues_all(all_df))
-            hic_frac = np.array([_est['mean'] - _est['error'], _est['mean'] + _est['error']])
-            logger.info('Estimated raw Hi-C read fraction from a single sample via '
-                        'p-value sum method: {:#.4g} - {:#.4g} %'
-                        .format(*hic_frac * 100))
+        # TODO reinstate the small pool code
+        if n_frag_obs < 500:
+            raise ApplicationException('At least {} fragment observations are required. Found {}'.format(
+                500, n_frag_obs))
+        # if n_read_obs < 500 or n_frag_obs < 500:
+        #     # Single estimation for a small observation pool
+        #     small_pool = True
+        #     logger.warning('The number of observations was small, bootstrapping will not be performed')
+        #     _mean, _err = empirical_fraction(dataframe_to_array(all_df))
+        #     raw_frac = np.array([_mean - 2*_err, _mean + 2*_err])
+        #     logger.info('Estimated raw Hi-C read fraction from a single sample via '
+        #                 'p-value sum method: [{:#.4g},{:#.4g}] %'
+        #                 .format(*hic_frac * 100))
+        #     obs_frac = all_df.obs_extent.sum() / (mean_insert * n_frag_obs)
+        # else:
 
-        else:
-            # init same random number state
-            random_state = np.random.RandomState(seed)
-            # Use bootstrap resampling to estimate confidence interval
-            small_pool = False
-            _sample_est = []
-            for _ in tqdm.tqdm(range(num_sample), desc='Bootstrapping CI'):
-                # calculate p-values using a sample of observations
-                _smpl = assign_empirical_pvalues_all(extract_sample(all_df, frac_sample, 100, 100000, random_state))
-                # estimate hi-c fraction for this sample
-                _sample_est.append(pvalue_expectation(_smpl))
-            _sample_est = pandas.DataFrame(_sample_est)
+        small_pool = False
 
-            # CI defined by 95% quantile range
-            hic_frac = _sample_est['mean'].quantile(q=[0.025, 0.975]).values
-            logger.info('Estimated raw Hi-C read fraction from bootstrap resampling '
-                        'via p-value sum method: 95% CI [{:#.4g},{:#.4g}] %'
-                        .format(*hic_frac * 100))
-
-        report['raw_fraction'] = hic_frac
+        # Use bootstrap resampling to estimate confidence interval for raw and adjusted
+        bs_frac = BootstrapFraction(all_df, num_sample, frac_sample, mean_insert, 100, seed)
+        raw_frac, adj_frac = bs_frac.confidence()
+        # Also report what the observed fraction was estimated to be
+        obs_frac = bs_frac.obs_frac()
 
         # TODO for multi-digests with varying length ligation products, using the longest
-        #   will lead to overestimating the observered fraction. This could be calculated as
+        #   will lead to overestimating the observed fraction. This could be calculated as
         #   a weighted sum over abundance of each possible junction.
-        obs_frac = observed_fraction(round(mean_read_len), round(mean_insert), 'additive',
-                                     k_size + 1, k_size + digest.longest_junction() + 1)
         if 1 - obs_frac < 0:
             logger.warning('Small fragment size can lead to double-counting due to read-pair overlap')
             logger.warning('Observed fraction exceeds 1 ({:#.4g}), therefore unobserved will be reported as 0'
@@ -730,17 +835,22 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
                         .format(mean_insert, 1 - obs_frac))
             report['unobs_fraction'] = 1 - obs_frac
 
-        report['adj_fraction'] = hic_frac * 1 / obs_frac
+        report['raw_fraction'] = raw_frac
+        logger.info('Estimated raw Hi-C read fraction from bootstrap resampling '
+                    'via p-value sum method: 95% CI [{:#.4g},{:#.4g}] %'
+                    .format(*raw_frac * 100))
+
+        report['adj_fraction'] = adj_frac
         if np.any(report['adj_fraction'] > 1):
             logger.warning('Rejecting nonsensical result for adjusted fraction that exceeded 100%')
             report['adj_fraction'] = None
         else:
             if small_pool:
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: {:#.4g} - {:#.4g} %'
-                            .format(*hic_frac * 1/obs_frac * 100))
+                            .format(*adj_frac * 100))
             else:
                 logger.info('Estimated Hi-C read fraction adjusted for unobserved: 95% CI [{:#.4g},{:#.4g}] %'
-                            .format(*hic_frac * 1/obs_frac * 100))
+                            .format(*adj_frac * 100))
 
         report['digestion'] = {'cutsites': digest.to_dict('cutsite'),
                                'junctions': digest.to_dict('junction')}

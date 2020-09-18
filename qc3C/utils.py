@@ -37,16 +37,18 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     return obs_extent / (mean_frag_size * n_fragments)
 
 
-def make_observable_mask(read_len: int, insert_len: int, left_margin: int, right_margin: int) -> np.ndarray:
+def make_observable_mask(read_len: int, insert_len: int, paired: bool,
+                         left_margin: int, right_margin: int) -> np.ndarray:
     """
     Use a mask to calculate the proportion of a fragment which can be interrogated
     due to the need for a sliding window around any observed junction sequence.
 
     :param read_len: the average read-length
     :param insert_len: the average insert (or fragment) length
+    :param paired: True=fragment observed from both ends, otherwise one end obs only
     :param left_margin: left-side margin which cannot be observed due to algorithm constraints
     :param right_margin: right-side margin which cannot observed due to algorithm constraints
-    :return:
+    :return: mask
     """
     frag_mask = np.zeros(insert_len, dtype=np.int)
     read_mask = np.zeros(read_len, dtype=np.int)
@@ -57,12 +59,13 @@ def make_observable_mask(read_len: int, insert_len: int, left_margin: int, right
     # handling the edge-case where the insert length is less than the read length
     a = read_len if read_len < insert_len else insert_len
     frag_mask[:a] += read_mask[:a]
-    frag_mask[-a:] += read_mask[::-1][-a:]
+    if paired:
+        frag_mask[-a:] += read_mask[::-1][-a:]
     # return the fragment mask
     return frag_mask
 
 
-def observed_fraction(read_len: int, insert_len: int, method: str,
+def observed_fraction(read_len: int, insert_len: int, method: str, paired: bool,
                       left_margin: int = 0, right_margin: int = 0) -> float:
     """
     Calculate an estimate of the observed fraction. Here, read-pairs provide a means of inspecting
@@ -72,18 +75,15 @@ def observed_fraction(read_len: int, insert_len: int, method: str,
     :param read_len: the average read-length
     :param insert_len: the average insert (or fragment) length
     :param method: "additive" or "binary" determines how the mean of the mask is calculated.
+    :param paired: True=fragment observed from both ends, otherwise one end obs only
     :param left_margin: left-side margin which cannot be observed due to algorithm constraints
     :param right_margin: right-side margin which cannot observed due to algorithm constraints
     :return: estimated fraction of extent observed depending on method
     """
-    logger.debug('Parameters to unobserved fraction: read_len: {} insert_len: {} '
-                 'method: {} left_margin: {} right_margin: {}'.format(
-        read_len, insert_len, method, left_margin, right_margin))
-
     if method == 'additive':
-        return make_observable_mask(read_len, insert_len, left_margin, right_margin).mean()
+        return make_observable_mask(read_len, insert_len, paired, left_margin, right_margin).mean()
     elif method == 'binary':
-        return (make_observable_mask(read_len, insert_len, left_margin, right_margin) > 0).mean()
+        return (make_observable_mask(read_len, insert_len, paired, left_margin, right_margin) > 0).mean()
     else:
         raise ApplicationException('unknown method {}'.format(method))
 
@@ -306,7 +306,7 @@ def write_html_report(fpath: str, report: Dict):
         fp.write("    </body>\n</html>")
 
 
-def guess_quality_encoding(fastq_path: str, n_reads: int = 1000) -> int:
+def guess_quality_encoding(fastq_path: str, n_reads: int = 5000, solexa: bool  = False) -> int:
     """
     Look at a sample of reads within a FastQ format file, to guess
     whether its encoding begins at 33 or 64. The more reads inspected
@@ -314,23 +314,36 @@ def guess_quality_encoding(fastq_path: str, n_reads: int = 1000) -> int:
     to demonstrate that it is base-33.
     :param fastq_path: the path to the FastQ format file
     :param n_reads: the number of reads to inspect
-    :return: 33 if base-33, 64 if base-64
+    :param solexa: if true, report when its possibly solexa encoding
+    :return: 33 if base-33, 64 if base-64 (or 59 if solexa = True)
     """
     with open_input(fastq_path) as in_h:
-        for n, (_id, _seq, _qual) in enumerate(read_seq(in_h), 1):
-            if sum(1 for b in _qual.encode() if b < 64) > 0:
-                return 33
+        lowest = 999
+        for n, (_id, _desc, _seq, _qual) in enumerate(read_seq(in_h), 1):
+            min_qual = np.asarray(bytearray(_qual.encode())).min()
+            if min_qual < lowest:
+                lowest = min_qual
             if n == n_reads:
                 break
-    return 64
+
+    # Phred33
+    if lowest < 59:
+        enc = 33
+    # possibly Solexa
+    elif solexa and lowest < 64:
+        enc = 59
+    # Phred64
+    else:
+        enc = 64
+    return enc
 
 
-def read_seq(fp: TextIO) -> (str, str, Optional[str]):
+def read_seq(fp: TextIO) -> (str, Optional[str], str, Optional[str]):
     """
     Method to quickly read FastA or FastQ files using a generator function.
     Originally sourced from https://github.com/lh3/readfq
     :param fp: input file object
-    :return: tuple
+    :return: tuple (name, desc, seq, qual)
     """
     last = None  # this is a buffer keeping the last unprocessed line
 
@@ -343,7 +356,8 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
         if not last:
             break
 
-        name, seqs, last = last[1:].partition(" ")[0], [], None
+        parts = last[1:].partition(" ")
+        name, desc, seqs, last = parts[0], parts[2] if len(parts) > 1 else None, [], None
         for l in fp:  # read the sequence
             if l[0] in '@+>':
                 last = l[:-1]
@@ -351,7 +365,7 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
             seqs.append(l[:-1])
 
         if not last or last[0] != '+':  # this is a fasta record
-            yield name, ''.join(seqs), None  # yield a fasta record
+            yield name, desc, ''.join(seqs), None  # yield a fasta record
             if not last:
                 break
 
@@ -362,8 +376,8 @@ def read_seq(fp: TextIO) -> (str, str, Optional[str]):
                 leng += len(l) - 1
                 if leng >= len(seq):  # have read enough quality
                     last = None
-                    yield name, seq, ''.join(seqs)  # yield a fastq record
+                    yield name, desc, seq, ''.join(seqs)  # yield a fastq record
                     break
             if last:  # reach EOF before reading enough quality
-                yield name, seq, None  # yield a fasta record instead
+                yield name, desc, seq, None  # yield a fasta record instead
                 break

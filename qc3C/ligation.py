@@ -243,6 +243,7 @@ class Digest(object):
             return self.any_junction.match
         elif method == 'find':
             return self.any_junction.search
+            # return self.any_junction.finditer
         elif method == 'endswith':
             return self.end_junction.search
 

@@ -8,6 +8,7 @@ pandas
 psutil
 pysam
 pytest
+recordclass
 scipy
 simplejson
 tqdm

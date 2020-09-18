@@ -101,11 +101,11 @@ qc3C kmer --yes --mean-insert 300 --enzyme DpnII --reads reads_r1.fq.gz --reads 
 
 #### Analysing in bam mode
 
-Users must first map reads to the chosen reference sequence and create a query-name ordered bam file. We strongly encourage the use bwa mem for the step of mapping. _Note, qc3C currently will not create the bam file for you._
+Users must first map reads to the chosen reference sequence and create a query-name ordered bam file. We strongly encourage using bwa mem for the mapping step. _Note, although this might change in the future, currently qc3C will not create the bam file for you nor sort an existing one in to query-name order._
 
-1. first prior to mapping, an index of the reference sequence is created
-2. next, reads are mapped to reference using bwa mem and sorted by query-name
-3. last, bam mode analysis is run
+1. create an index of the reference sequence
+2. map the reads to reference and sort by query-name
+3. run qc3C bam mode analysis
 ```
 bwa index ref.fna.gz
 bwa mem -5SP ref.fna.gz reads_r1.fq.gz reads_r2.fq.gz | samtools view -bS - | samtools sort -n -o reads2ref.bam -
@@ -116,27 +116,25 @@ qc3C bam --enzyme DpnII --fasta ref.fna.gz --bam reads2ref.bam --output-path out
 
 #### Output location
 
-All files created by qc3C are written to the location specified by the command line option `--output-path [-o]`. 
-
-By default is the current directory (`.`).
+All files created by qc3C are written to the location specified by the command line option `--output-path [-o]`. By default, is the current directory (`.`).
 
 #### Console and log file
 
-Results from stages of the analysis are directed as they occur to both the console and a log file named qc3C.log. The log file contains detailed information on the input run parameters, as well as the outcome of each step in the analysis. By default, the console output is slightly less verbose but the same level of detail can be obtained with the `--verbose [-v]` switch.
+The result from each step of the analysis is directed as it completes to both the console and a log file (`qc3C.log`). The log file records all logging output and thus it is more detailed than what is sent to the console. By setting `--verbose`, the console will receive the same information as the log file.
 
 #### Analysis report file
 
-At the end of a run, qc3C writes a full report in both JSON (`report.qc3C.json`) and HTML (`report.qc3C.html`) formats. These files contain the same information as found in the log. The JSON file is intended to ease programmatic access to the analysis results, while the HTML file is intended to provide a basic presentation of the structured report data for users.
+At the end of a run, qc3C writes a full report in both JSON (`report.qc3C.json`) and HTML (`report.qc3C.html`) formats. These files contain the same information as found in the log. While the intent of the JSON file is to ease programmatic access to the analysis results, the HTML file provides a simple structured presentation for users.
 
 #### MultiQC support
 
 To further aid users, we have contributed a qc3C module to [MultiQC](https://github.com/ewels/MultiQC). We encourage users to make use of this program, particularly when inspecting multiple libraries, for the benefits of its interactive and visual representation.
 
-Both analysis modes are supported and reported separately within the MultiQC report.
+Both analysis modes are supported and reported separately within the MultiQC report, as well as parsing multiple experiments in to a single visual report.
 
 Using MultiQC
 ```
-multiqc <analysis-directory>
+multiqc [ analysis-directory | directory-of-analysis-directories ]
 ```
 
 [example reports to be added soon]

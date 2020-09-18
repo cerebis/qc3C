@@ -13,6 +13,9 @@ __log_name__ = 'qc3C.log'
 __report_name__ = 'report.qc3C'
 __table_name__ = 'obs_table.tsv.gz'
 
+# these parameters are used more than once, therefore they have been defined here.
+_DEFAULT_MIN_QUALITY = 3
+_DEFAULT_KMER_SIZE = 24
 
 def main():
     import argparse
@@ -130,12 +133,13 @@ def main():
                                           description='Create kmer database.')
     cmd_mkdb.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
                           help='Ascii-encoding base for quality scores [guessed]')
-    cmd_mkdb.add_argument('--min-quality', default=5, type=int, action=UniqueStore,
-                          help='Minimum quality before a base position is converted to N')
+    cmd_mkdb.add_argument('--min-quality', default=_DEFAULT_MIN_QUALITY, type=int, action=UniqueStore,
+                          help='Minimum quality before a base position is converted to N [{}]'
+                          .format(_DEFAULT_MIN_QUALITY))
     cmd_mkdb.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
-    cmd_mkdb.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
-                          help='K-mer size to use in generating a library [24]')
+    cmd_mkdb.add_argument('--kmer-size', default=_DEFAULT_KMER_SIZE, type=int, action=UniqueStore,
+                          help='K-mer size to use in generating a library [{}]'.format(_DEFAULT_KMER_SIZE))
     cmd_mkdb.add_argument('-r', '--reads', metavar='FASTQ_FILE', action='append', required=True,
                           help='FastQ format reads to use in generating the k-mer library '
                                '(use multiple times for multiple files)')
@@ -162,20 +166,21 @@ def main():
     cmd_kmer.add_argument('--ascii-base', default=None, choices=[33, 64], type=int,
                           help='Ascii-encoding base for quality scores [guessed]')
     cmd_kmer.add_argument('--min-quality', default=None, type=int, action=UniqueStore,
-                          help='Minimum quality before a base position is converted to N [5]')
+                          help='Minimum quality before a base position is converted to N [{}]'
+                          .format(_DEFAULT_MIN_QUALITY))  # set below
     cmd_kmer.add_argument('--hash-size', default='10M', action=UniqueStore,
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
-    cmd_kmer.add_argument('--kmer-size', default=24, type=int, action=UniqueStore,
-                          help='K-mer size to use in generating a library [24]')
+    cmd_kmer.add_argument('--kmer-size', default=_DEFAULT_KMER_SIZE, type=int, action=UniqueStore,
+                          help='K-mer size to use in generating a library [{}]'.format(_DEFAULT_KMER_SIZE))
     cmd_kmer.add_argument('--merged-reads', default=False, action='store_true',
                           help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
                           help='Save the collected observations to a file')
-    cmd_kmer.add_argument('--num-sample', type=int, default=50, action=UniqueStore,
-                          help='Number of samples to use in bootstrapping confidence interval [50]')
-    cmd_kmer.add_argument('--frac-sample', type=float, default=0.33,
+    cmd_kmer.add_argument('--num-sample', type=int, default=100, action=UniqueStore,
+                          help='Number of samples to use in bootstrapping confidence interval [100]')
+    cmd_kmer.add_argument('--frac-sample', type=float, default=1,
                           choices=Range(0, 1, include_start=False), action=UniqueStore,
-                          help='Fraction of observations to use per-bootstrap iteration [1/3]')
+                          help='Fraction of observations to use per-bootstrap iteration [1]')
     cmd_kmer.add_argument('-x', '--max-freq-quantile', default=0.9, type=float,
                           choices=Range(0, 1, include_start=False), action=UniqueStore,
                           help='Ignore k-mers possessing frequencies above this quantile [0.9]')
@@ -289,6 +294,8 @@ def main():
                 build_lib = False
 
             if build_lib:
+                if args.min_quality is None:
+                    args.min_quality = _DEFAULT_MIN_QUALITY
                 args.lib = make_lib_path(args)
                 mk_database(args.lib, args.reads, args.kmer_size, args.hash_size,
                             args.ascii_base, args.min_quality, args.threads)
@@ -311,7 +318,8 @@ def main():
         sys.exit(1)
 
     except Exception as ex:
-        logger.error(str(ex))
+        # use repr to get a little more info from system exceptions
+        logger.error(repr(ex))
         if args.debug:
             logger.exception(ex)
         sys.exit(1)

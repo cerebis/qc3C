@@ -66,24 +66,9 @@ def mk_database(db_path: str, fastq_files: List[str], kmer_size: int, hash_size:
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE)
 
-            return_value = None
-            while True:
-                try:
-                    return_value = p.poll()
-                    if return_value is not None:
-                        break
-                    out, err = p.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc = psutil.Process(p.pid)
-                    if proc.status() == psutil.STATUS_ZOMBIE:
-                        logger.error('Jellyfish aborted, orphaned subprocesses will require termination')
-                        break
-                    elif not proc.is_running():
-                        # jellyfish ended normally
-                        break
-
-            if return_value is None or return_value > 0 :
-                logger.warning('Jellyfish subprocess did not return 0 (ok). Return value was: {}'.format(return_value))
+            out, err = p.communicate()
+            if p.returncode != 0:
+                logger.warning('Jellyfish subprocess did not return 0 (ok). Return value was: {}'.format(p.returncode))
                 if err:
                     logger.warning('Jellyfish stderr: {}'.format(err.decode()))
             else:
