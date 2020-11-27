@@ -2,6 +2,7 @@ import bz2
 import gzip
 import logging
 
+import numba as nb
 import numpy as np
 import os
 import simplejson as json
@@ -37,6 +38,7 @@ def simple_observed_fraction(obs_extent, mean_frag_size, n_fragments):
     return obs_extent / (mean_frag_size * n_fragments)
 
 
+@nb.jit(nopython=True, cache=True)
 def make_observable_mask(read_len: int, insert_len: int, paired: bool,
                          left_margin: int, right_margin: int) -> np.ndarray:
     """
@@ -50,8 +52,8 @@ def make_observable_mask(read_len: int, insert_len: int, paired: bool,
     :param right_margin: right-side margin which cannot observed due to algorithm constraints
     :return: mask
     """
-    frag_mask = np.zeros(insert_len, dtype=np.int)
-    read_mask = np.zeros(read_len, dtype=np.int)
+    frag_mask = np.zeros(insert_len, np.uint8)
+    read_mask = np.zeros(read_len, np.uint8)
     # create a read mask that represents the region of the read which can be interrogated
     x_min, x_max = left_margin, read_len - right_margin
     read_mask[x_min:x_max] = 1
@@ -306,7 +308,7 @@ def write_html_report(fpath: str, report: Dict):
         fp.write("    </body>\n</html>")
 
 
-def guess_quality_encoding(fastq_path: str, n_reads: int = 5000, solexa: bool  = False) -> int:
+def guess_quality_encoding(fastq_path: str, n_reads: int = 5000, solexa: bool = False) -> int:
     """
     Look at a sample of reads within a FastQ format file, to guess
     whether its encoding begins at 33 or 64. The more reads inspected

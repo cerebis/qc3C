@@ -10,10 +10,10 @@ class MaxObsLimit(StopIteration):
 
 
 class ZeroCoverageException(ApplicationException):
-    """Queried observations of K-mer coverage summed to zero"""
+    """Queried K-mer had zero coverage"""
     def __init__(self):
         super(ZeroCoverageException, self).__init__(
-            'Queried observations of K-mer coverage summed to zero')
+            'Queried K-mer had zero coverage')
 
 
 class LowCoverageException(ApplicationException):

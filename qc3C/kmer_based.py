@@ -1,19 +1,13 @@
-import bz2
-import gzip
-import numba as nb
-import numpy as np
 import pandas
-import subprocess
 import tqdm
-import logging
 
 from collections import OrderedDict
 from recordclass import make_dataclass, asdict
 from scipy.stats import gmean
-from typing import TextIO, Optional, Dict, List, Tuple
+from typing import List, Tuple
 from qc3C.exceptions import *
 from qc3C.ligation import Digest
-from qc3C.utils import write_jsonline, count_sequences, write_html_report, read_seq
+from qc3C.utils import *
 from qc3C._version import runtime_info
 
 try:
@@ -25,31 +19,36 @@ logger = logging.getLogger(__name__)
 
 CovInfo = make_dataclass('cov_info',
                          [('mean_inner', float), ('mean_outer', float), ('has_junc', bool), ('read_pos', int),
-                          ('seq_hash', int), ('obs_extent', int), ('obs_count', int), ('is_merged', bool)])
+                          ('seq_id', str), ('read_extent', int), ('junc_size', int), ('obs_count', int),
+                          ('is_merged', bool)])
 
 OBS_ARRAY_DTYPE = np.dtype([('ratio', np.float64), ('has_junc', np.uint8),
-                            ('seq_hash', np.int64), ('obs_extent', np.uint64), ('is_merged', np.bool)])
+                            ('seq_hash', np.int64), ('read_extent', np.uint64),
+                            ('junc_size', np.int64), ('is_merged', np.bool),
+                            ('obs_count', np.int64)])
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=True)
 def obs_fraction(obs, insert_size):
     """
     Calculate the fraction of insert extent that has been observed in this set of observations.
     For merged reads, the extent is considered full observed, while we compare the cumulative extent
     of unmerged pairs against the mean insert size.
     """
-    obs_sum = 0
-    tot_sum = 0
+    frac = np.zeros(obs.shape[0], np.float64)
     for i in range(obs.shape[0]):
-        _oi = obs['obs_extent'][i]
-        if obs['is_merged'][i]:
-            obs_sum += _oi
-            tot_sum += _oi
+        _oi = obs[i]
+        if _oi['is_merged']:
+            _mask = make_observable_mask(_oi['read_extent'], _oi['read_extent'], False, 0, _oi['junc_size'])
         else:
-            obs_sum += _oi
-            tot_sum += insert_size
-    return obs_sum / tot_sum
+            _mask = make_observable_mask(int(_oi['read_extent'] / _oi['obs_count']), insert_size,
+                                         _oi['obs_count'] > 1, 0, _oi['junc_size'])
 
+        # binary coverage of the ith fragment
+        frac[i] = (_mask > 0).mean()
+
+    # overall coverge summary statistics for this set of observations
+    return frac.mean()
 
 @nb.jit(nopython=True, cache=True)
 def empirical_fraction(obs, insert_size):
@@ -59,6 +58,7 @@ def empirical_fraction(obs, insert_size):
     without define our empirical p-values for the null hypothesis.
 
     :param obs: the table of observations
+    :param insert_size: expected insert size
     :return: an scalar estimates for the empirical Hi-C fraction, its variance and the observed fraction
     """
     # separate obs with and without junctions
@@ -98,8 +98,14 @@ def dataframe_to_array(_df: pandas.DataFrame):
     :param _df: dataframe of observations
     :return: numpy array
     """
-    _obs_arr = _df.loc[:, ['ratio', 'has_junc', 'seq_hash', 'obs_extent', 'is_merged']].values
-    _obs_arr = np.array([(_obs_arr[i, 0], _obs_arr[i, 1], _obs_arr[i, 2], _obs_arr[i, 3], _obs_arr[i, 4])
+    _obs_arr = _df.loc[:, ['ratio', 'has_junc',
+                           'seq_id', 'read_extent',
+                           'junc_size', 'is_merged',
+                           'obs_count']].values
+    _obs_arr = np.array([(_obs_arr[i, 0], _obs_arr[i, 1],
+                          hash(_obs_arr[i, 2]), _obs_arr[i, 3],
+                          _obs_arr[i, 4], _obs_arr[i, 5],
+                          _obs_arr[i, 6])
                          for i in range(_obs_arr.shape[0])], OBS_ARRAY_DTYPE)
     return _obs_arr
 
@@ -134,7 +140,7 @@ class BootstrapFraction(object):
         self.extents = np.zeros(_n_samples, dtype=np.int)
         for i in tqdm.tqdm(range(_n_samples), desc='Bootstrapping CI'):
             _smpl = self._take_sample()
-            self.extents[i] = _smpl['obs_extent'].sum()
+            self.extents[i] = _smpl['read_extent'].sum()
             self.estimates[i, :] = empirical_fraction(_smpl, self.insert_size)
 
     def _take_sample(self):
@@ -152,7 +158,7 @@ class BootstrapFraction(object):
         """
         return self.estimates[:, 0].mean(), self.estimates[:, 0].std(), np.median(self.estimates[:, 0])
 
-    def confidence(self, conf_width: float = 0.95) -> Tuple[np.ndarray, np.ndarray]:
+    def confidence(self, conf_width: float = 0.95) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Confidence interval for the set of computed estimates, returning both raw and adjusted estimations
         :param conf_width: confidence interval width (default 95%)
@@ -163,7 +169,7 @@ class BootstrapFraction(object):
         _raw = np.quantile(self.estimates[:, 0], q=[_q, 1-_q])
         _obs_frac = np.quantile(self.estimates[:, 2], q=[_q, 1-_q])
         _adj = _raw * 1 / _obs_frac
-        return _raw, _adj
+        return _raw, _adj, _obs_frac
 
     def obs_frac(self) -> float:
         """
@@ -171,8 +177,6 @@ class BootstrapFraction(object):
         :return: observed fraction
         """
         return self.estimates[:, 2].mean()
-        # estimated_total_extent = self.sample_size * self.insert_size
-        # return self.extents.mean() / estimated_total_extent
 
 
 class Counter(object):
@@ -361,29 +365,7 @@ def next_read(filename: str, searcher, longest_site: int, k_size: int,
             _junc_len = _end - _ix
             _junc_seq = _match.group()
             tracker[_junc_seq] += 1
-            # only report sites which meet flank constraints
-            if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
-                yield _seq, _ix, _id, seq_len, _is_merged, _junc_len, _junc_seq
-            else:
-                counts['flank'] += 1
-
-        # _match_iter = searcher(_seq)
-        # while True:
-        #     _match = next(_match_iter, None)
-        #     if _match is None:
-        #         yield _seq, None, _id, seq_len, _is_merged, None, None
-        #         break
-        #     _ix, _end = _match.span()
-        #     _junc_len = _end - _ix
-        #     _junc_seq = _match.group()
-        #     tracker[_junc_seq] += 1
-        #     # only report sites which meet flank constraints
-        #     if k_size + 1 <= _ix <= seq_len - (k_size + _junc_len + 1):
-        #         yield _seq, _ix, _id, seq_len, _is_merged, _junc_len, _junc_seq
-        #         break
-        #     else:
-        #         counts['flank'] += 1
-        #         break
+            yield _seq, _ix, _id, seq_len, _is_merged, _junc_len, _junc_seq
 
 
 def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_insert: int,
@@ -429,27 +411,46 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
             k_cov = query_jf[mer]
             return k_cov
 
-        outer = np.empty(shape=6, dtype=np.int)
-        inner = np.empty(shape=3, dtype=np.int)
         r_shift = 0
         l_flank = r_flank = (k - site_size) // 2
         if (k - site_size) % 2 != 0:
             l_flank += 1
             r_shift = 1
 
-        assert ix - k > 0, 'smallest valid index is: {}'.format(k+1)
-        assert ix + site_size + r_shift + k - 1 < len(seq), \
-            'largest valid index is: {}'.format(len(seq) - site_size - k - r_shift)
+        if ix <= k:
+            outer = np.zeros(shape=3, dtype=np.int)
+            inner = np.zeros(shape=3, dtype=np.int)
+            for i in range(-1, 2):
+                si = seq[ix + site_size + r_shift + i: ix + site_size + k + r_shift + i]
+                outer[i+1] = get_kmer_cov(si)
+                si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
+                inner[i+1] = get_kmer_cov(si)
+                if outer[i+1] == 0 or inner[i+1] == 0:
+                    raise ZeroCoverageException()
 
-        for i in range(-1, 2):
-            si = seq[ix - k + i: ix + i]
-            outer[i+1] = get_kmer_cov(si)
-            si = seq[ix + site_size + r_shift + i: ix + site_size + k + r_shift + i]
-            outer[i+4] = get_kmer_cov(si)
-            si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
-            inner[i+1] = get_kmer_cov(si)
-            if outer[i+1] == 0 or outer[i+4] == 0 or inner[i+1] == 0:
-                raise ZeroCoverageException()
+        elif ix + site_size + r_shift + k -1 >= len(seq):
+            outer = np.zeros(shape=3, dtype=np.int)
+            inner = np.zeros(shape=3, dtype=np.int)
+            for i in range(-1, 2):
+                si = seq[ix - k + i: ix + i]
+                outer[i+1] = get_kmer_cov(si)
+                si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
+                inner[i+1] = get_kmer_cov(si)
+                if outer[i+1] == 0 or inner[i+1] == 0:
+                    raise ZeroCoverageException()
+
+        else:
+            outer = np.zeros(shape=6, dtype=np.int)
+            inner = np.zeros(shape=3, dtype=np.int)
+            for i in range(-1, 2):
+                si = seq[ix - k + i: ix + i]
+                outer[i+1] = get_kmer_cov(si)
+                si = seq[ix + site_size + r_shift + i: ix + site_size + k + r_shift + i]
+                outer[i+4] = get_kmer_cov(si)
+                si = seq[ix - l_flank + i: ix + site_size + r_flank + i]
+                inner[i+1] = get_kmer_cov(si)
+                if outer[i+1] == 0 or outer[i+4] == 0 or inner[i+1] == 0:
+                    raise ZeroCoverageException()
 
         cov_inner, cov_outer = gmean(inner), gmean(outer)
         if cov_outer < min_cov:
@@ -483,7 +484,7 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
     logger.info('Maximum k-mer frequency of {} at quantile {} in Jellyfish library {}'
                 .format(max_coverage, max_freq_quantile, kmer_db))
     # A rule of thumb min threshold
-    min_coverage = mean_coverage - 0.25 * mean_coverage
+    min_coverage = mean_coverage / 2.5
     if min_coverage < 1:
         # no less than 1, which is pedantic as later we don't accept zero-coverage k-mers anyhow
         min_coverage = 1
@@ -630,25 +631,31 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
 
                 cumulative_length += seq_len
 
-                # unobservable region of any inspected read (left and right ends)
-                flank_size = k_size + 1 + k_size + junc_len + 1
-
                 # if this is a new fragment, record the observation
                 if _id not in coverage_obs:
-                    coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, hash(_id),
-                                                seq_len - flank_size, 1, is_merged)
+                    coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix,
+                                                _id, seq_len, junc_len, 1, is_merged)
                 # otherwise always supersede preexisting non-junc obs
                 # or for junc obs flip a coin to choose which obs to keep
                 else:
-                    # we must always record the additional observed extent
+                    # we must always record the additional read and flank extent
                     _ci = coverage_obs[_id]
                     assert not _ci.is_merged, 'Merged sequence appears more than once!'
-                    _ci.obs_extent += seq_len - flank_size
+                    _ci.read_extent += seq_len
                     _ci.obs_count += 1
-                    if not _ci.has_junc or randint(2) == 0:
+
+                    # when both do or do not contain a junction, flip a coin to accept one obs over the other
+                    if ((_ci.has_junc and has_junc) or (not _ci.has_junc and not has_junc)) and randint(2) == 0:
                         # replace obs
-                        coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, hash(_id),
-                                                    _ci.obs_extent, _ci.obs_count, is_merged)
+                        coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, _id,
+                                                    _ci.read_extent, junc_len, _ci.obs_count, is_merged)
+
+                    # always take a junction observation over non-junc
+                    # this emulates what would occur if we could see the entire insert each time.
+                    elif has_junc:
+                        # replace obs
+                        coverage_obs[_id] = CovInfo(mean_inner, mean_outer, has_junc, ix, _id,
+                                                    _ci.read_extent, junc_len, _ci.obs_count, is_merged)
 
                 if max_obs is not None and analysis_counter.accepted() >= sampled_obs[n]:
                     break
@@ -757,7 +764,8 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
             sum(z_inner), sum(z_outer), sum(z_inner & z_outer)))
 
         # inspect the tally of observations with/without junctions
-        n_with_junc, n_without_junc = all_df.groupby('has_junc').size().sort_values(ascending=True)
+        n_with_junc = (all_df['has_junc'] == True).sum()
+        n_without_junc = len(all_df) - n_with_junc
         report['n_without_junc'] = n_without_junc
         report['n_with_junc'] = n_with_junc
         logger.info('Break down of fragment observations: without junction {:,} with junction {:,}'
@@ -818,9 +826,9 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
 
         # Use bootstrap resampling to estimate confidence interval for raw and adjusted
         bs_frac = BootstrapFraction(all_df, num_sample, frac_sample, mean_insert, 100, seed)
-        raw_frac, adj_frac = bs_frac.confidence()
+        raw_frac, adj_frac, obs_frac = bs_frac.confidence()
         # Also report what the observed fraction was estimated to be
-        obs_frac = bs_frac.obs_frac()
+        obs_frac = obs_frac.mean()
 
         # TODO for multi-digests with varying length ligation products, using the longest
         #   will lead to overestimating the observed fraction. This could be calculated as
