@@ -29,7 +29,7 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
 
     install_requires=[
-        'astropy',
+        'astropy==4.0.1',
         'biopython==1.76',
         'leven',
         'json2html',
