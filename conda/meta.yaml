@@ -7,6 +7,7 @@ package:
 
 source:
   git_url: "https://github.com/cerebis/{{ name }}.git"
+  git_tag: {{ version }}
   sha256: 9b5c0914edef9b7b4b2b687340e4836bd0b84ff1d4885014323d056e40b3fc5f
 
 build:
