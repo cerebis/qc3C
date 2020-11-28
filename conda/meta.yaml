@@ -1,5 +1,5 @@
 {% set name = "qc3C" %}
-{% set version = "v0.5rc8" %}
+{% set version = "v0.5rc9" %}
 
 package:
   name: "{{ name|lower }}"
@@ -7,7 +7,7 @@ package:
 
 source:
   git_url: "https://github.com/cerebis/{{ name }}.git"
-  sha256: 6d3b9bb7c21270a6681be3bad8343db5642ad520198d31a2df9b503b39c0efdd
+  sha256: 64efe03a103fb3ddca72604643b47f723152deabeeb8193a3afa34b90839ad6b
 
 build:
   number: 0
