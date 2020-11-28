@@ -48,7 +48,7 @@ def test_make_observable_mask(obs_mask, read_len, insert_len, left_margin, right
     # setup
     obs_mask = np.array(obs_mask, dtype=np.int)
     # exercise and verify
-    result = make_observable_mask(read_len, insert_len, left_margin, right_margin)
+    result = make_observable_mask(read_len, insert_len, True, left_margin, right_margin)
     assert np.all(result == obs_mask)
 
 
@@ -61,7 +61,7 @@ def test_make_observable_mask(obs_mask, read_len, insert_len, left_margin, right
                           (1.0, 10, 20, 'additive', 0, 0),
                           (1.2, 15, 20, 'additive', 1, 2)])
 def test_observed_fraction(obs_frac, read_len, insert_len, method, kmer_size, junc_size):
-    assert observed_fraction(read_len, insert_len, method, kmer_size, junc_size) == obs_frac
+    assert observed_fraction(read_len, insert_len, method, True, kmer_size, junc_size) == obs_frac
 
 
 @pytest.mark.parametrize('exc_class, method', [(ApplicationException, 'foobar')])
