@@ -1,4 +1,4 @@
-astropy==4.0.1
+astropy<4.1
 biopython==1.76
 json2html
 leven
