@@ -172,8 +172,8 @@ def main():
                           help='Initial hash size in generating a library (eg. 10M, 2G) [10M]')
     cmd_kmer.add_argument('--kmer-size', default=_DEFAULT_KMER_SIZE, type=int, action=UniqueStore,
                           help='K-mer size to use in generating a library [{}]'.format(_DEFAULT_KMER_SIZE))
-    cmd_kmer.add_argument('--merged-reads', default=False, action='store_true',
-                          help='Input reads are merged pairs')
+    # cmd_kmer.add_argument('--merged-reads', default=False, action='store_true',
+    #                       help='Input reads are merged pairs')
     cmd_kmer.add_argument('--write-table', default=False, action='store_true',
                           help='Save the collected observations to a file')
     cmd_kmer.add_argument('--num-sample', type=int, default=100, action=UniqueStore,
@@ -302,8 +302,8 @@ def main():
 
             table_path = None if not args.write_table else os.path.join(args.output_path, __table_name__)
 
-            if args.merged_reads:
-                raise ApplicationException('Merged reads specified, insert size will be ignored')
+            # if args.merged_reads:
+            #     raise ApplicationException('Merged reads specified, insert size will be ignored')
 
             kmer.analyse(args.enzyme, args.lib, args.reads, args.mean_insert,
                          sample_rate=args.sample_rate, seed=args.seed, max_freq_quantile=args.max_freq_quantile,

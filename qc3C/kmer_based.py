@@ -50,6 +50,12 @@ def obs_fraction(obs, insert_size):
     # overall coverge summary statistics for this set of observations
     return frac.mean()
 
+
+@nb.jit(nopython=True, cache=True)
+def redun_fraction(obs):
+    return (2 * obs['is_merged'].sum() + obs[~ obs['is_merged']]['obs_count'].sum()) / len(obs)
+
+
 @nb.jit(nopython=True, cache=True)
 def empirical_fraction(obs, insert_size):
     """
@@ -89,7 +95,11 @@ def empirical_fraction(obs, insert_size):
     n_fragments = len(obs)
 
     q = 1 - wj_pvals
-    return q.sum() / n_fragments, np.sqrt((q * (1-q)).sum()) / n_fragments, obs_fraction(obs, insert_size)
+
+    return (q.sum() / n_fragments,
+            np.sqrt((q * (1-q)).sum()) / n_fragments,
+            obs_fraction(obs, insert_size),
+            redun_fraction(obs))
 
 
 def dataframe_to_array(_df: pandas.DataFrame):
@@ -136,7 +146,7 @@ class BootstrapFraction(object):
         self.random_state = np.random.RandomState(_seed)
 
         # compute the bootstrap estimates, storing in an array
-        self.estimates = np.zeros((_n_samples, 3), dtype=np.float)
+        self.estimates = np.zeros((_n_samples, 4), dtype=np.float)
         self.extents = np.zeros(_n_samples, dtype=np.int)
         for i in tqdm.tqdm(range(_n_samples), desc='Bootstrapping CI'):
             _smpl = self._take_sample()
@@ -168,7 +178,8 @@ class BootstrapFraction(object):
         _q = 0.5 * (1 - conf_width)
         _raw = np.quantile(self.estimates[:, 0], q=[_q, 1-_q])
         _obs_frac = np.quantile(self.estimates[:, 2], q=[_q, 1-_q])
-        _adj = _raw * 1 / _obs_frac
+        _redun_frac = np.quantile(self.estimates[:, 3], q=[_q, 1-_q])
+        _adj = _raw * 1 / (_obs_frac * _redun_frac/2)
         return _raw, _adj, _obs_frac
 
     def obs_frac(self) -> float:
@@ -795,14 +806,16 @@ def analyse(enzyme_names: List[str], kmer_db: str, read_files: List[str], mean_i
         logger.info('Expected fraction by random chance 50% GC: {:#.4g}%'
                     .format(sum(1 / 4 ** li.junc_len for li in digest.junctions.values()) * 100))
 
+        # update any observation count of all merged pairs to 2 for the purposes of calculating redundancy
+        all_df.loc[all_df.is_merged, 'obs_count'] = 2
         # the total number of read observations
         n_read_obs = all_df.obs_count.sum()
         # the number of unique sequence ids is assumed to be the number of fragment observations
         n_frag_obs = len(all_df)
         logger.info('Number of observations: fragments {}, reads {}'.format(n_frag_obs, n_read_obs))
 
-        # if n_read_obs == n_frag_obs:
-        #     logger.warning('Equal number of fragments and reads! Hi-C is expected to be paired.')
+        if n_read_obs == n_frag_obs:
+            logger.warning('Equal number of fragments and reads! Hi-C is expected to be paired.')
         obs_redundancy = n_read_obs / n_frag_obs
         logger.info('Fragment observational redundancy (read obs per fragment): {:.4g}'.format(obs_redundancy))
 
