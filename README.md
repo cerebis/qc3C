@@ -142,6 +142,8 @@ To further aid users, we have contributed a qc3C module to [MultiQC](https://git
 
 Both analysis modes are supported and reported separately within the MultiQC report, as well as parsing multiple experiments in to a single visual report.
 
+**PLEASE NOTE:** MultiQC support for qc3C is currently part of the development release 1.10dev. Until such time that 1.10 is fully release, users will need to install the MultiQC master branch from github.
+
 Using MultiQC
 ```
 multiqc [ analysis-directory | directory-of-analysis-directories ]
