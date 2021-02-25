@@ -29,9 +29,19 @@ conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 
 A docker image is available from DockerHub at docker://cerebis/qc3c.
 
+To use the Docker image, you must make your data available to the running Docker container through either a bind mount or shared volume. In the example below, the data is imagined to be stored within the directory `$PWD/mydata`. Access to this location is achieved through a volume, where the default working directory within the Docker container is `/app`. In doing it this way, the output directory will be created underneath `$PWD/mydata`.
+
 ```
+# fetch the latest qc3C image
 docker pull cerebis/qc3c
-docker run cerebis/qc3c -h
+
+# kmer mode
+docker run -v $PWD/mydata:/app cerebis/qc3c kmer --mean-insert 300 --enzyme DpnII --lib kmers.jf \
+    --reads reads_r1.fq.gz --reads reads_r2.fq.gz --output-path output
+
+# bam mode
+docker run -v $PWD/mydata:/app cerebis/qc3c bam --enzyme DpnII --fasta ref.fna.gz --bam reads2ref.bam \
+    --output-path output
 ```
 
 ### Using Singularity
