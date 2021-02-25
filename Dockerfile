@@ -7,7 +7,7 @@ LABEL org.label-schema.description="qc3C - reference-free quality control for Hi
 LABEL org.label-schema.url="http://github.com/cerebis/qc3C/"
 LABEL org.label-schema.vcs-url="http://github.com/cerebis/qc3C/"
 LABEL org.label-schema.vcs-ref="b6b6e409e07cc8d3aa403f516574c1ab6049e73b"
-LABEL org.label-schema.version="0.5rc9"
+LABEL org.label-schema.version="0.5"
 LABEL org.label-schema.docker.cmd="docker run -v /path/to/data:/app cerebis/qc3c kmer -y -m 210 -e DpnII -r reads.fq.gz"
 
 RUN conda install --yes -c cerebis -c conda-forge -c bioconda qc3c "python<3.8" && conda clean -afy
