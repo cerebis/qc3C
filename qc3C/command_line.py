@@ -318,8 +318,7 @@ def main():
         sys.exit(1)
 
     except Exception as ex:
-        # use repr to get a little more info from system exceptions
-        logger.error(repr(ex))
+        logger.error(str(ex))
         if args.debug:
             logger.exception(ex)
         sys.exit(1)
