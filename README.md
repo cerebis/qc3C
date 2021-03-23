@@ -46,11 +46,15 @@ docker run -v $PWD/mydata:/app cerebis/qc3c bam --enzyme DpnII --fasta ref.fna.g
 
 ### Using Singularity
 
-We rely on singularity users importing our Docker image, which could be done as follows.
+We rely on singularity users importing our Docker image, which could be done as follows. 
+
+**NOTE:** Singularity installations can automatically mount the host filesystem, which can result in masking the paths used by the qc3C container. It is recommended that users override this behaviour (`--contain`) and bind the paths that they require to access the files to be analyzed (`--bind [data-path]`).
+
+If only the host path is specified in a bind argument, the path will be replicated in the container. To access files relative to your current working directory, simply bind `$PWD`.
 
 ```
 singularity build qc3C.sif docker://cerebis/qc3c
-singularity run qc3C.sif
+singularity run --contain --bind $PWD qc3C.sif bam -e DpnII --fasta data/reference.fasta --bam data/hic2ref.bam
 ```
 
 ### From Github
