@@ -23,7 +23,7 @@ Installation is accomplished as follows.
 conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 ``` 
 
-###Please note the following regardng Jellyfish
+### Please note the following regardng Jellyfish
 
 Jellyfish is released as a separate packasge on our own Anaconda channel (`cerebis`), however at present there exists a name clash with another unrelated package within the large `conda-forge` channel. To prevent conda from obtaining the wrong package it is important to mention `-c cerebis` before `-c conda-forge`, as the order of channels on the commandline establishes priority. We will likely modify our package name to elininate this issue.
 
