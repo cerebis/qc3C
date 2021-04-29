@@ -23,7 +23,11 @@ Installation is accomplished as follows.
 conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
 ``` 
 
-**Note**: our anaconda channel includes a build of the _k_-mer counting tool Jellyfish, which includes Python language hooks. **Please do not attempt to forcibly install the bioconda kmer-jellyfish package** as it has not been built with any language hooks and qc3C will fail to run, throwing `NoModuleFoundError: No module named 'jellyfish'`. For the curious, this deficiency within the bioconda package likely stems from the official policy to support Linux and OSX, while the language hooks within Jellyfish do not successfully build for OSX.
+###Please note the following regardng Jellyfish
+
+Jellyfish is released as a separate packasge on our own Anaconda channel (`cerebis`), however at present there exists a name clash with another unrelated package within the large `conda-forge` channel. To prevent conda from obtaining the wrong package it is important to mention `-c cerebis` before `-c conda-forge`, as the order of channels on the commandline establishes priority. We will likely modify our package name to elininate this issue.
+
+Further, do not forcibly install the alternative `bioconda` package kmer-jellyfish. qc3C requires support for Python language hooks within Jellfyish, however due to the bioconda requirement that any included package support both Linux and OSX, kmer-jellyfish has dropped all hook support since the more complex build fails under OSX. Consequently, if this package is installed instead of ours, qc3C will throw the error `NoModuleFoundError: No module named 'jellyfish'`. 
 
 ### Using Docker
 
