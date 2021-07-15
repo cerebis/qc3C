@@ -18,6 +18,8 @@ Due to dependency issues, qc3C currently runs only on the Linux x86_64 platform.
 
 We maintain our own conda packages for both qc3C and a few supporting packages on the Anaconda channel [cerebis](https://anaconda.org/cerebis). 
 
+**Note:** Older distributions of Linux (cira <=2016) may encounter the error ("glibc 2.23 not found") when attempting to run the resulting Conda environment. If this is you, we recommend that you either take advantage of our Docker image or follow the easy two-step procedure below.
+
 Installation is accomplished as follows.
 ```
 conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
@@ -61,21 +63,34 @@ singularity build qc3C.sif docker://cerebis/qc3c
 singularity run --contain --bind $PWD qc3C.sif bam -e DpnII --fasta data/reference.fasta --bam data/hic2ref.bam
 ```
 
-### From Github
+### Using Two-Step Procedure
+
+This procedure employs a combination of Conda and Pip to install qc3C.
+
+#### 1. Create a Conda environment with Jellyfish and Python
 
 qc3C can be installed directly from github, however this approach requires that [Jellyfish](https://github.com/gmarcais/Jellyfish), along with its Python language hooks be installed first. Although the basic Jellyfish binaries are easily built and installed, a build which correctly installs the necessary Python hooks can be more problematic. [See Jellyfish issue #134](https://github.com/gmarcais/Jellyfish/issues/134) for more information on how to remedy this issue. 
 
-Instead, we encourage users to dodge this stumbling-block by installing our Jellyfish conda package. Afterwards, qc3C is easily installed using Pip.
+Instead, we strongly encourage users to install our Jellyfish Conda package.
 
-**Note:** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, qc3C will fail to run with the error `NoModuleFoundError: No module named 'jellyfish'`. 
+**Please Note** Do not use Bioconda's Jellyfish package, as it contains only the Jellyfish binaries and no language hooks. As a result, qc3C will fail to run with the error `NoModuleFoundError: No module named 'jellyfish'`. 
 
-The following bash snippet prepares the conda environment with our Jellyfish package and installs qc3C directly from Github.
-
+#### 2. Install qc3C using Pip directly from Github.
+ 
 ```$bash
+# step 1
 conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda jellyfish
 conda activate qc3c
+# step 2
 pip install git+https://github.com/cerebis/qc3C
 ```
+
+### Known Problems Running qc3C
+
+1. An error at runtime "glibc 2.23 not found"
+
+    Older distributions of Linux may not possess a recent enough version of the glibc library. In these cases, we strongly urge users to use the [two-step procedure outlined above](#using-two-step-procedure) or the Docker image.
+
 
 ## Using qc3C
 
