@@ -18,7 +18,7 @@ Due to dependency issues, qc3C currently runs only on the Linux x86_64 platform.
 
 We maintain our own conda packages for both qc3C and a few supporting packages on the Anaconda channel [cerebis](https://anaconda.org/cerebis). 
 
-**Note:** Older distributions of Linux (cira <=2016) may encounter the error ("glibc 2.23 not found") when attempting to run the resulting Conda environment. If this is you, we recommend that you either take advantage of our Docker image or follow the easy two-step procedure below.
+**Note:** Older distributions of Linux (cira <=2016) may encounter the error ("glibc 2.23 not found") when attempting to run the resulting Conda environment. If this is you, we recommend that you either take advantage of our Docker image or follow the easy [two-step procedure below](#using-two-step-procedure).
 
 Installation is accomplished as follows.
 ```
