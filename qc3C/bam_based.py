@@ -388,7 +388,13 @@ class read_pairs(object):
             self.n_reads = count_bam_reads(bam_path, max_cpu=threads)
             logger.info('Found {:,} alignments to analyse'.format(self.n_reads))
 
+        # all warnings from htslib are suppressed as a workaround for spurious
+        # warnings regarding a missing index. An index is not required nor advantageous
+        # for how we access the BAM file.
+        _old_pysam_level = pysam.set_verbosity(0)
         self.bam = pysam.AlignmentFile(bam_path, mode='rb', threads=threads)
+        pysam.set_verbosity(_old_pysam_level)
+
         try:
             _header = self.bam.header['HD']
         except KeyError as ex:
