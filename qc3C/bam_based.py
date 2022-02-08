@@ -10,7 +10,7 @@ from collections import OrderedDict
 from abc import ABC, abstractmethod
 from astropy.stats import sigma_clipped_stats
 from typing import Optional, Tuple, List
-from qc3C.exceptions import NameSortingException, UnknownLibraryKitException, MaxObsLimit, InsufficientDataException
+from qc3C.exceptions import NameSortingException, MaxObsLimit, InsufficientDataException, NoBamHeaderException
 from qc3C.ligation import CutSitesDB, Digest
 from qc3C.utils import init_random_state, write_jsonline, observed_fraction, write_html_report
 from qc3C._version import runtime_info
@@ -389,7 +389,10 @@ class read_pairs(object):
             logger.info('Found {:,} alignments to analyse'.format(self.n_reads))
 
         self.bam = pysam.AlignmentFile(bam_path, mode='rb', threads=threads)
-        _header = self.bam.header['HD']
+        try:
+            _header = self.bam.header['HD']
+        except KeyError as ex:
+            raise NoBamHeaderException(bam_path)
         if 'SO' not in _header or _header['SO'] != 'queryname':
             raise NameSortingException(bam_path)
 

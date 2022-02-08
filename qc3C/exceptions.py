@@ -44,6 +44,13 @@ class InvalidEnzymeException(ApplicationException):
             'The enzyme name \"{}\" contains invalid characters'.format(target))
 
 
+class NoBamHeaderException(ApplicationException):
+    """Bam contains no HD record"""
+    def __init__(self, filename: str):
+        super(NoBamHeaderException, self).__init__(
+            '{} had no header (HD record), cannot verify sorting'.format(filename))
+
+
 class NameSortingException(ApplicationException):
     """Bam is not sorted by read name"""
     def __init__(self, filename: str):
