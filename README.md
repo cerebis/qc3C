@@ -96,17 +96,21 @@ pip install git+https://github.com/cerebis/qc3C
 
 ### Modes of analysis
 
-qc3C is capable of quality assessing Hi-C read-sets in two ways. The traditional method, reliant on aligning reads to a reference sequence, and a new reference-free _k_-mer based approach.  
+qc3C is capable of quality assessing Hi-C read-sets in two ways. The traditional method, reliant on aligning reads to a reference sequence, and a new reference-free _k_-mer based approach.
 
-#### Requirements per mode
+### General Requirements
+
+- Adapter trimmed Hi-C read-set in FastQ format.
+
+We recommend [fastp](https://github.com/OpenGene/fastp) for adapter trimming.
+
+#### Per-mode Requirements
 
 - **Reference-free _k_-mer mode** 
-  - a Hi-C read-set
   - mean insert size
   - the names of the restriction enzymes used in protocol digest 
 
 - **Reference-dependent bam mode**
-  - a Hi-C read-set
   - a (preferably high quality) reference sequence
   - the names of the restriction enzymes used in protocol digest
 
@@ -134,8 +138,11 @@ qc3C kmer --yes --mean-insert 300 --enzyme DpnII --reads reads_r1.fq.gz --reads 
 
 #### Analysing in bam mode
 
-Users must first map reads to the chosen reference sequence and create a query-name ordered bam file. We strongly encourage using bwa mem for the mapping step. _Note, although this might change in the future, currently qc3C will not create the bam file for you nor sort an existing one in to query-name order._
+For BAM mode analysis, users must first create a query-name sorted BAM file of their Hi-C reads to the relevant reference sequence(s). 
 
+Please note, that although a mapper might output reads in an apparently sorted order, this is not guaranteed. Therefore, you must <ins>explicitly sort the BAM by query-name</ins> (eg. `samtools sort -n ...`). At runtime, the BAM header is inspected for an indication of the correct order and qc3C will halt if this record is missing. Further, we encourage using BWA MEM for the mapping step as this mapper was used for development.
+
+Steps:
 1. create an index of the reference sequence
 2. map the reads to reference and sort by query-name
 3. run qc3C bam mode analysis
