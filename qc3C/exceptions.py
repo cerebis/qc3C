@@ -50,12 +50,11 @@ class NoBamHeaderException(ApplicationException):
         super(NoBamHeaderException, self).__init__(
             '{} had no header (HD record), cannot verify sorting'.format(filename))
 
-
 class NameSortingException(ApplicationException):
     """Bam is not sorted by read name"""
-    def __init__(self, filename: str):
+    def __init__(self, filename: str, sort_info: str = '(missing)'):
         super(NameSortingException, self).__init__(
-            '{} must be sorted by name'.format(filename))
+            '{} must be sorted by name. SO field was: {}'.format(filename, sort_info))
 
 
 class InsufficientDataException(ApplicationException):

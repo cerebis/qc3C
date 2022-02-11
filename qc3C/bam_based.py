@@ -399,8 +399,10 @@ class read_pairs(object):
             _header = self.bam.header['HD']
         except KeyError as ex:
             raise NoBamHeaderException(bam_path)
-        if 'SO' not in _header or _header['SO'] != 'queryname':
+        if 'SO' not in _header:
             raise NameSortingException(bam_path)
+        elif _header['SO'] != 'queryname':
+            raise NameSortingException(bam_path, _header['SO'])
 
         self.random_state = random_state
         self.show_progress = show_progress
