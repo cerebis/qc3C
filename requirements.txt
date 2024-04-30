@@ -3,7 +3,7 @@ biopython==1.76
 json2html
 leven
 numba
-numpy
+numpy<1.23
 pandas
 psutil
 pysam

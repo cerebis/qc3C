@@ -34,7 +34,7 @@ setuptools.setup(
         'leven',
         'json2html',
         'numba',
-        'numpy',
+        'numpy<1.23',
         'pandas',
         'psutil',
         'pysam',

@@ -11,7 +11,7 @@ source:
   sha256: 06c30e7dd0eaf0cb0d48a628cb949e526db53c5443d1df8662959ffbf72bd21d
 
 build:
-  number: 2
+  number: 3
   script: "{{ PYTHON }} -m pip install . -vv"
 
 requirements:
@@ -35,7 +35,7 @@ requirements:
     - json2html
     - leven
     - numba
-    - numpy
+    - numpy<1.23
     - pandas
     - psutil
     - pysam
