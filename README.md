@@ -22,7 +22,7 @@ We maintain our own conda packages for both qc3C and a few supporting packages o
 
 Installation is accomplished as follows.
 ```
-conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3C
+conda create -y -n qc3c -c cerebis -c conda-forge -c bioconda qc3c
 ``` 
 
 ### Please note the following regardng Jellyfish
